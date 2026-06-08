@@ -22,7 +22,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
 mod render;
@@ -303,6 +303,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(FRAME_COLOR))
+        .padding(Padding::vertical(1))
         .title(title)
         .title_bottom(bottom);
     let inner = outer.inner(area);
