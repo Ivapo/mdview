@@ -42,7 +42,8 @@ If you see the alt-screen enter (`[?1049h`) and leave (`[?1049l`) sequences with
 
 Constants at the top of `src/main.rs` are intentionally there so the user can edit them in one place. Don't bury them behind a config file.
 
-- `CONTENT_WIDTH` — column width (default 80)
+- `MAX_CONTENT_WIDTH` — cap on column width (default 120). Actual width = `min(MAX_CONTENT_WIDTH, term_width - SIDE_MARGIN)`, computed once at `App::new` via `crossterm::terminal::size()` and stored on `App.content_width`. Terminal resize does NOT re-flow tables — re-launch for that.
+- `SIDE_MARGIN` — left+right breathing room subtracted from terminal width
 - `FRAME_COLOR` — border + bottom-hint color
 - `TITLE_COLOR` — filename color and status-success color
 - `SCROLL_STEP`, `PAGE_STEP`, `STATUS_TTL` — self-explanatory

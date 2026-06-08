@@ -27,7 +27,8 @@ use ratatui::{
 
 mod render;
 
-const CONTENT_WIDTH: u16 = 80;
+const MAX_CONTENT_WIDTH: u16 = 120;
+const SIDE_MARGIN: u16 = 4;
 const SCROLL_STEP: u16 = 1;
 const PAGE_STEP: u16 = 10;
 const FRAME_COLOR: Color = Color::DarkGray;
@@ -50,6 +51,7 @@ struct App {
     path: PathBuf,
     source: String,
     rendered: Text<'static>,
+    content_width: u16,
     mode: Mode,
     scroll: u16,
     raw_line_count: u16,
@@ -60,12 +62,18 @@ struct App {
 impl App {
     fn new(path: PathBuf, source: String) -> Self {
         let raw_line_count = source.lines().count().min(u16::MAX as usize) as u16;
-        let rendered = render::render(&source, CONTENT_WIDTH);
+        let term_width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
+        let content_width = term_width
+            .saturating_sub(SIDE_MARGIN)
+            .min(MAX_CONTENT_WIDTH)
+            .max(20);
+        let rendered = render::render(&source, content_width);
         let rendered_line_count = rendered.lines.len().min(u16::MAX as usize) as u16;
         Self {
             path,
             source,
             rendered,
+            content_width,
             mode: Mode::Rendered,
             scroll: 0,
             raw_line_count,
@@ -260,7 +268,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    let content_area = center_column(inner, CONTENT_WIDTH);
+    let content_area = center_column(inner, app.content_width);
 
     match app.mode {
         Mode::Rendered => {

@@ -45,10 +45,13 @@ cargo build --release
 A few constants near the top of `src/main.rs` control the look:
 
 ```rust
-const CONTENT_WIDTH: u16 = 80;          // column width
-const FRAME_COLOR:   Color = Color::DarkGray;
-const TITLE_COLOR:   Color = Color::Green;
+const MAX_CONTENT_WIDTH: u16 = 120;     // cap on column width
+const SIDE_MARGIN:       u16 = 4;       // breathing room left+right
+const FRAME_COLOR:       Color = Color::DarkGray;
+const TITLE_COLOR:       Color = Color::Green;
 ```
+
+The column adapts to the terminal width at startup: `min(MAX_CONTENT_WIDTH, terminal_width - SIDE_MARGIN)`. Wider terminal → wider column for tables and code.
 
 ## Stack
 
