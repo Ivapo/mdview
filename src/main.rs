@@ -28,9 +28,11 @@ use ratatui::{
 mod render;
 
 const MAX_CONTENT_WIDTH: u16 = 120;
+const MIN_CONTENT_WIDTH: u16 = 80;
 const SIDE_MARGIN: u16 = 4;
 const SCROLL_STEP: u16 = 1;
 const PAGE_STEP: u16 = 10;
+const WIDTH_STEP: u16 = 4;
 const FRAME_COLOR: Color = Color::DarkGray;
 const TITLE_COLOR: Color = Color::Green;
 const STATUS_TTL: Duration = Duration::from_secs(2);
@@ -88,6 +90,34 @@ impl App {
             Mode::Raw => Mode::Rendered,
         };
         self.scroll = 0;
+    }
+
+    fn adjust_width(&mut self, delta: i32) {
+        let term_w = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
+        let max = term_w
+            .saturating_sub(SIDE_MARGIN)
+            .min(MAX_CONTENT_WIDTH);
+        let min = MIN_CONTENT_WIDTH.min(max);
+        let next = (self.content_width as i32 + delta).clamp(min as i32, max as i32) as u16;
+        if next == self.content_width {
+            self.status = Some(Status {
+                text: format!("width {} (limit)", self.content_width),
+                until: Instant::now() + STATUS_TTL,
+                error: false,
+            });
+            return;
+        }
+        self.content_width = next;
+        self.rendered = render::render(&self.source, self.content_width);
+        self.rendered_line_count = self.rendered.lines.len().min(u16::MAX as usize) as u16;
+        self.scroll = self
+            .scroll
+            .min(self.rendered_line_count.saturating_sub(1));
+        self.status = Some(Status {
+            text: format!("width {}", self.content_width),
+            until: Instant::now() + STATUS_TTL,
+            error: false,
+        });
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u16) {
@@ -189,6 +219,10 @@ fn event_loop(
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Tab => app.toggle_mode(),
                 KeyCode::Char('y') => app.yank_path(),
+                KeyCode::Char('-') => app.adjust_width(-(WIDTH_STEP as i32)),
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    app.adjust_width(WIDTH_STEP as i32)
+                }
                 KeyCode::Char('j') | KeyCode::Down => {
                     app.scroll_by(SCROLL_STEP as i32, viewport_height)
                 }
@@ -246,6 +280,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
         Span::styled(format!(" {mode_label}  "), hint),
         Span::styled("j/k", key),
         Span::styled(" scroll  ", hint),
+        Span::styled("-/+", key),
+        Span::styled(" width  ", hint),
         Span::styled("y", key),
         Span::styled(" copy path  ", hint),
         Span::styled("q", key),
