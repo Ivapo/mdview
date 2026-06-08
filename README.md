@@ -1,6 +1,9 @@
 # mdview
 
-A minimal terminal markdown reader written in Rust.
+[![crates.io](https://img.shields.io/crates/v/mdview-tui.svg)](https://crates.io/crates/mdview-tui)
+[![license](https://img.shields.io/crates/l/mdview-tui.svg)](LICENSE)
+
+A minimal terminal markdown reader written in Rust. Published on crates.io as [`mdview-tui`](https://crates.io/crates/mdview-tui); the installed binary is `mdview`.
 
 ```
 mdview notes.md
