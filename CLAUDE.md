@@ -8,7 +8,8 @@ Notes for future Claude sessions on this repo.
 
 ## Layout
 
-- `src/main.rs` — the entire app (~250 lines). Keep it that way unless complexity genuinely justifies a split.
+- `src/main.rs` — TUI shell: argv parsing, terminal lifecycle, event loop, frame layout. Don't grow this with markdown logic.
+- `src/render.rs` — the markdown renderer: walks pulldown-cmark events and produces a `ratatui::text::Text<'static>`. All rendering decisions (colors, table layout, code-block style) live here.
 - `sample.md` — scratch file for poking at rendering.
 
 ## Run
@@ -46,9 +47,19 @@ Constants at the top of `src/main.rs` are intentionally there so the user can ed
 - `TITLE_COLOR` — filename color and status-success color
 - `SCROLL_STEP`, `PAGE_STEP`, `STATUS_TTL` — self-explanatory
 
-## Rendering limits (important context)
+## Renderer (`src/render.rs`)
 
-The rendering backend is `tui-markdown` 0.3, which is deliberately small. It does **not** render markdown tables and styles code blocks lightly. The user knows this and discussed it on 2026-06-07 — they may eventually want a custom `pulldown-cmark`-based renderer (with `syntect` for code blocks and a manual table layouter) to match `md-tui`-style output, but until they ask for it, don't pre-build it. If they do ask: scope is roughly 300–600 lines and should live in its own module (e.g. `src/render.rs`), not balloon `main.rs`.
+We replaced `tui-markdown` with a hand-rolled `pulldown-cmark`-driven renderer on 2026-06-07. Roughly 400 lines. The shape:
+
+- `render(source, width) -> Text<'static>` is the only public entry. Width matters because tables and code-block backgrounds pre-fit to it. `App` calls this once at startup and caches the result (no per-frame re-parse).
+- `Renderer` holds: current line buffer (`cur`), a style stack (so nested emphasis composes), a list-context stack (for ordered counters / nesting depth), `quote_depth`, and `Option<CodeCtx>` / `Option<TableCtx>` for buffered block constructs.
+- When inside a table, `push_span` redirects to the current cell instead of `cur`. Cells are buffered until `TagEnd::Table`, then laid out with box-drawing borders. Columns shrink proportionally if the natural width exceeds `width`; cells longer than their column truncate with `…`.
+- Code blocks use `syntect`'s default `base16-ocean.dark` theme. Each highlighted line is padded with `CODE_BG`-styled spaces to the full column so the background fills.
+- Headings h1/h2 emit a `═` / `─` underbar sized to the heading text. h3-h6 are color-only.
+- The rendered `Paragraph` still has `Wrap { trim: false }` so long plain paragraphs wrap. Tables and code blocks are pre-fit to `CONTENT_WIDTH`, so wrap shouldn't visually break them — but if you grow features, keep this invariant.
+- `rendered_line_count` (used for scroll bounds) counts logical lines, not wrapped visual lines. Scroll-to-bottom may stop slightly above the true end when paragraphs wrap. Acceptable for v1; fix with the `unstable-rendered-line-info` ratatui feature if it matters.
+
+Color constants are at the top of `render.rs` (`CODE_BG`, `INLINE_CODE_BG`, `LINK_COLOR`, `RULE_COLOR`, `SYNTECT_THEME`, …). Keep them there so they're easy to tweak.
 
 ## Dependencies
 
@@ -56,7 +67,9 @@ Versions pinned to current majors (June 2026):
 
 - `ratatui = "0.30"` — note the 0.30 split into `ratatui-core`/`ratatui-widgets` workspace
 - `crossterm = "0.29"`
-- `tui-markdown = "0.3"` — uses `ratatui-core ^0.1`, compatible with ratatui 0.30
+- `pulldown-cmark = "0.13"` — markdown parsing (default features off, only `html`)
+- `syntect = "5.3"` — code-block syntax highlighting (default features on; pulls `onig`)
+- `unicode-width = "0.2"` — cell widths for table column sizing
 - `arboard = "3.6"` — clipboard for `y`
 - `anyhow = "1.0"`
 

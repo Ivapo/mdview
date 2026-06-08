@@ -21,9 +21,11 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+
+mod render;
 
 const CONTENT_WIDTH: u16 = 80;
 const SCROLL_STEP: u16 = 1;
@@ -47,21 +49,27 @@ struct Status {
 struct App {
     path: PathBuf,
     source: String,
+    rendered: Text<'static>,
     mode: Mode,
     scroll: u16,
     raw_line_count: u16,
+    rendered_line_count: u16,
     status: Option<Status>,
 }
 
 impl App {
     fn new(path: PathBuf, source: String) -> Self {
         let raw_line_count = source.lines().count().min(u16::MAX as usize) as u16;
+        let rendered = render::render(&source, CONTENT_WIDTH);
+        let rendered_line_count = rendered.lines.len().min(u16::MAX as usize) as u16;
         Self {
             path,
             source,
+            rendered,
             mode: Mode::Rendered,
             scroll: 0,
             raw_line_count,
+            rendered_line_count,
             status: None,
         }
     }
@@ -75,9 +83,11 @@ impl App {
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u16) {
-        let max = self
-            .raw_line_count
-            .saturating_sub(viewport_height.max(1).saturating_sub(1));
+        let total = match self.mode {
+            Mode::Rendered => self.rendered_line_count,
+            Mode::Raw => self.raw_line_count,
+        };
+        let max = total.saturating_sub(viewport_height.max(1).saturating_sub(1));
         let next = (self.scroll as i32 + delta).clamp(0, max as i32);
         self.scroll = next as u16;
     }
@@ -254,8 +264,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
 
     match app.mode {
         Mode::Rendered => {
-            let text = tui_markdown::from_str(&app.source);
-            let paragraph = Paragraph::new(text)
+            let paragraph = Paragraph::new(app.rendered.clone())
                 .wrap(Wrap { trim: false })
                 .scroll((app.scroll, 0));
             frame.render_widget(paragraph, content_area);

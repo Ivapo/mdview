@@ -53,11 +53,13 @@ const TITLE_COLOR:   Color = Color::Green;
 ## Stack
 
 - [`ratatui`](https://crates.io/crates/ratatui) + [`crossterm`](https://crates.io/crates/crossterm) — TUI rendering and input
-- [`tui-markdown`](https://crates.io/crates/tui-markdown) — markdown → ratatui `Text`
+- [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) — CommonMark parser
+- [`syntect`](https://crates.io/crates/syntect) — code-block syntax highlighting
+- [`unicode-width`](https://crates.io/crates/unicode-width) — cell widths for table layout
 - [`arboard`](https://crates.io/crates/arboard) — clipboard
 - [`anyhow`](https://crates.io/crates/anyhow) — error handling
 
-Rendering is intentionally minimal — tui-markdown does not render tables and styles code blocks lightly. If you want syntax-highlighted code blocks, table layout, and richer block styling, [`md-tui`](https://github.com/henriklovhaug/md-tui) is a more featureful reader.
+The markdown renderer is a hand-rolled walk over the pulldown-cmark event stream — see `src/render.rs`. It handles headings (with `═`/`─` underbars on h1/h2), bold/italic/strikethrough/links, inline code, fenced code blocks (syntect-highlighted with a dark background and a language tag), ordered and unordered lists with nesting, blockquotes with a left bar, horizontal rules, and tables with box-drawing borders that shrink columns to fit the content width.
 
 ## License
 
