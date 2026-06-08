@@ -46,15 +46,16 @@ cargo build --release
 A few constants near the top of `src/main.rs` control the look:
 
 ```rust
-const MAX_CONTENT_WIDTH: u16 = 120;     // cap on column width
-const MIN_CONTENT_WIDTH: u16 = 80;      // floor for -/+ adjustments
-const SIDE_MARGIN:       u16 = 4;       // breathing room left+right
-const WIDTH_STEP:        u16 = 4;       // cells per -/+ press
-const FRAME_COLOR:       Color = Color::DarkGray;
-const TITLE_COLOR:       Color = Color::Green;
+const MAX_CONTENT_WIDTH:     u16 = 120;   // cap on column width
+const MIN_CONTENT_WIDTH:     u16 = 80;    // floor for -/+ adjustments
+const DEFAULT_CONTENT_WIDTH: u16 = 90;    // startup width target
+const SIDE_MARGIN:           u16 = 4;     // breathing room left+right
+const WIDTH_STEP:            u16 = 4;     // cells per -/+ press
+const FRAME_COLOR:           Color = Color::DarkGray;
+const TITLE_COLOR:           Color = Color::Green;
 ```
 
-The column adapts to the terminal width at startup: `min(MAX_CONTENT_WIDTH, terminal_width - SIDE_MARGIN)`. Wider terminal → wider column for tables and code. Adjust live with `-` and `+` (clamped to `[MIN_CONTENT_WIDTH, terminal_width - SIDE_MARGIN]`); each press re-renders the cached markdown.
+Startup column = `min(DEFAULT_CONTENT_WIDTH, terminal_width - SIDE_MARGIN)`. Adjust live with `-` and `+` (clamped to `[MIN_CONTENT_WIDTH, min(MAX_CONTENT_WIDTH, terminal_width - SIDE_MARGIN)]`); each press re-renders the cached markdown.
 
 ## Stack
 

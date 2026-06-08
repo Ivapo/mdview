@@ -29,6 +29,7 @@ mod render;
 
 const MAX_CONTENT_WIDTH: u16 = 120;
 const MIN_CONTENT_WIDTH: u16 = 80;
+const DEFAULT_CONTENT_WIDTH: u16 = 90;
 const SIDE_MARGIN: u16 = 4;
 const SCROLL_STEP: u16 = 1;
 const PAGE_STEP: u16 = 10;
@@ -65,9 +66,8 @@ impl App {
     fn new(path: PathBuf, source: String) -> Self {
         let raw_line_count = source.lines().count().min(u16::MAX as usize) as u16;
         let term_width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
-        let content_width = term_width
-            .saturating_sub(SIDE_MARGIN)
-            .min(MAX_CONTENT_WIDTH)
+        let content_width = DEFAULT_CONTENT_WIDTH
+            .min(term_width.saturating_sub(SIDE_MARGIN))
             .max(20);
         let rendered = render::render(&source, content_width);
         let rendered_line_count = rendered.lines.len().min(u16::MAX as usize) as u16;

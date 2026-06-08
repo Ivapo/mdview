@@ -42,7 +42,7 @@ If you see the alt-screen enter (`[?1049h`) and leave (`[?1049l`) sequences with
 
 Constants at the top of `src/main.rs` are intentionally there so the user can edit them in one place. Don't bury them behind a config file.
 
-- `MAX_CONTENT_WIDTH` / `MIN_CONTENT_WIDTH` — bounds on the column. Startup uses `min(MAX, term_width - SIDE_MARGIN)`, stored on `App.content_width`. `-`/`+` keys call `App::adjust_width(±WIDTH_STEP)` which re-renders the cached `Text` and reclamps scroll. Each adjustment re-queries `crossterm::terminal::size()` so the cap tracks terminal resizes between presses, but the initial render does not re-flow on bare resize events.
+- `MAX_CONTENT_WIDTH` / `MIN_CONTENT_WIDTH` / `DEFAULT_CONTENT_WIDTH` — bounds and startup target. Startup uses `min(DEFAULT_CONTENT_WIDTH, term_width - SIDE_MARGIN)`, stored on `App.content_width`. `-`/`+` keys call `App::adjust_width(±WIDTH_STEP)` which clamps to `[MIN, min(MAX, term_width - SIDE_MARGIN)]`, re-renders the cached `Text`, and reclamps scroll. Each adjustment re-queries `crossterm::terminal::size()` so the cap tracks terminal resizes between presses, but the initial render does not re-flow on bare resize events.
 - `SIDE_MARGIN` — left+right breathing room subtracted from terminal width
 - `WIDTH_STEP` — cells per `-`/`+` press
 - `FRAME_COLOR` — border + bottom-hint color
