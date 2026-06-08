@@ -89,7 +89,11 @@ impl App {
             Mode::Rendered => Mode::Raw,
             Mode::Raw => Mode::Rendered,
         };
-        self.scroll = 0;
+        let total = match self.mode {
+            Mode::Rendered => self.rendered_line_count,
+            Mode::Raw => self.raw_line_count,
+        };
+        self.scroll = self.scroll.min(total.saturating_sub(1));
     }
 
     fn adjust_width(&mut self, delta: i32) {
