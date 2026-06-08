@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use unicode_width::UnicodeWidthStr;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
@@ -27,7 +28,7 @@ use ratatui::{
 
 mod render;
 
-const MAX_CONTENT_WIDTH: u16 = 120;
+const MAX_CONTENT_WIDTH: u16 = 130;
 const MIN_CONTENT_WIDTH: u16 = 80;
 const DEFAULT_CONTENT_WIDTH: u16 = 90;
 const SIDE_MARGIN: u16 = 4;
@@ -70,7 +71,7 @@ impl App {
             .min(term_width.saturating_sub(SIDE_MARGIN))
             .max(20);
         let rendered = render::render(&source, content_width);
-        let rendered_line_count = rendered.lines.len().min(u16::MAX as usize) as u16;
+        let rendered_line_count = visual_line_count(&rendered, content_width);
         Self {
             path,
             source,
@@ -113,7 +114,7 @@ impl App {
         }
         self.content_width = next;
         self.rendered = render::render(&self.source, self.content_width);
-        self.rendered_line_count = self.rendered.lines.len().min(u16::MAX as usize) as u16;
+        self.rendered_line_count = visual_line_count(&self.rendered, self.content_width);
         self.scroll = self
             .scroll
             .min(self.rendered_line_count.saturating_sub(1));
@@ -327,6 +328,23 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
     }
 
     content_area.height
+}
+
+fn visual_line_count(text: &Text<'_>, width: u16) -> u16 {
+    let w = width.max(1) as usize;
+    let total: usize = text
+        .lines
+        .iter()
+        .map(|line| {
+            let span_w: usize = line
+                .spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            span_w.div_ceil(w).max(1)
+        })
+        .sum();
+    total.min(u16::MAX as usize) as u16
 }
 
 fn center_column(area: Rect, width: u16) -> Rect {

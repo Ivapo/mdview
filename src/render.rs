@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 const CODE_BG: Color = Color::Rgb(40, 42, 54);
 const INLINE_CODE_BG: Color = Color::Rgb(60, 60, 70);
-const INLINE_CODE_FG: Color = Color::Rgb(245, 245, 245);
+const INLINE_CODE_FG: Color = Color::Rgb(229, 181, 103);
 const QUOTE_COLOR: Color = Color::Rgb(150, 150, 150);
 const LINK_COLOR: Color = Color::Rgb(120, 170, 255);
 const RULE_COLOR: Color = Color::DarkGray;
@@ -48,6 +48,7 @@ struct Renderer {
     quote_depth: u16,
     code: Option<CodeCtx>,
     table: Option<TableCtx>,
+    item_pending: bool,
     syntax: SyntaxSet,
     theme: Theme,
 }
@@ -78,6 +79,7 @@ impl Renderer {
             quote_depth: 0,
             code: None,
             table: None,
+            item_pending: false,
             syntax,
             theme,
         }
@@ -193,12 +195,18 @@ impl Renderer {
 
     fn inline_code(&mut self, c: &str) {
         let style = Style::default().bg(INLINE_CODE_BG).fg(INLINE_CODE_FG);
-        self.push_span(Span::styled(format!(" {c} "), style));
+        self.push_span(Span::styled(c.to_string(), style));
     }
 
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph => self.ensure_line_break(),
+            Tag::Paragraph => {
+                if self.item_pending {
+                    self.item_pending = false;
+                } else {
+                    self.ensure_line_break();
+                }
+            }
             Tag::Heading { level, .. } => {
                 self.blank_line();
                 self.push_style(heading_style(level));
@@ -239,6 +247,7 @@ impl Renderer {
                 };
                 self.cur
                     .push(Span::styled(marker, Style::default().fg(Color::Cyan)));
+                self.item_pending = true;
             }
             Tag::Emphasis => {
                 self.push_style(Style::default().add_modifier(Modifier::ITALIC))
@@ -406,6 +415,11 @@ impl Renderer {
             }
             self.lines.push(Line::from(spans));
         }
+        self.lines.push(Line::from(Span::styled(
+            " ".repeat(self.width as usize),
+            Style::default().bg(CODE_BG),
+        )));
+        self.lines.push(Line::default());
     }
 
     fn emit_table(&mut self, ctx: &TableCtx) {
