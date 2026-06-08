@@ -13,10 +13,12 @@ Renders a single markdown file in a centered, fixed-width column inside the alte
 ## Install
 
 ```sh
-cargo install --git https://github.com/Ivapo/mdview
+cargo install mdview-tui
 ```
 
-Or clone and build:
+The crate is published as `mdview-tui` (the `mdview` name on crates.io was already taken), but the binary it installs is `mdview` — so you still run `mdview notes.md` after installing.
+
+Or build from source:
 
 ```sh
 git clone https://github.com/Ivapo/mdview
@@ -46,7 +48,7 @@ cargo build --release
 A few constants near the top of `src/main.rs` control the look:
 
 ```rust
-const MAX_CONTENT_WIDTH:     u16 = 120;   // cap on column width
+const MAX_CONTENT_WIDTH:     u16 = 130;   // cap on column width
 const MIN_CONTENT_WIDTH:     u16 = 80;    // floor for -/+ adjustments
 const DEFAULT_CONTENT_WIDTH: u16 = 90;    // startup width target
 const SIDE_MARGIN:           u16 = 4;     // breathing room left+right

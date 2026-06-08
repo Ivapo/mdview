@@ -1,7 +1,20 @@
 [package]
-name = "mdview"
+name = "mdview-tui"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "A minimal terminal markdown reader: opens a .md file in a centered column in the alternate screen, with syntax-highlighted code blocks and box-drawn tables."
+license = "MIT"
+repository = "https://github.com/Ivapo/mdview"
+homepage = "https://github.com/Ivapo/mdview"
+readme = "README.md"
+keywords = ["markdown", "tui", "terminal", "viewer", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+exclude = ["CLAUDE.md", "sample.md", "target/", ".claude/"]
+
+[[bin]]
+name = "mdview"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
