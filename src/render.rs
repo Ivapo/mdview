@@ -17,10 +17,16 @@ const CODE_BG: Color = Color::Rgb(40, 42, 54);
 const INLINE_CODE_BG: Color = Color::Rgb(60, 60, 70);
 const INLINE_CODE_FG: Color = Color::Rgb(229, 181, 103);
 const QUOTE_COLOR: Color = Color::Rgb(150, 150, 150);
+const QUOTE_BG: Color = Color::Rgb(50, 50, 58);
+const QUOTE_FG: Color = Color::Rgb(200, 200, 200);
 const LINK_COLOR: Color = Color::Rgb(120, 170, 255);
 const RULE_COLOR: Color = Color::DarkGray;
 const CODE_LANG_COLOR: Color = Color::Rgb(180, 180, 100);
 const SYNTECT_THEME: &str = "base16-ocean.dark";
+const QUOTE_PREFIX: &str = "▎ ";
+const QUOTE_PREFIX_W: usize = 2;
+const TABLE_MIN_COL: usize = 3;
+const CODE_LEFT_PAD: usize = 2;
 
 pub fn render(source: &str, width: u16) -> Text<'static> {
     let parser = Parser::new_ext(
@@ -46,6 +52,7 @@ struct Renderer {
     style_stack: Vec<Style>,
     lists: Vec<Option<u64>>,
     quote_depth: u16,
+    quote_starts: Vec<usize>,
     code: Option<CodeCtx>,
     table: Option<TableCtx>,
     item_pending: bool,
@@ -77,6 +84,7 @@ impl Renderer {
             style_stack: vec![],
             lists: vec![],
             quote_depth: 0,
+            quote_starts: vec![],
             code: None,
             table: None,
             item_pending: false,
@@ -107,11 +115,6 @@ impl Renderer {
         if let Some(t) = self.table.as_mut() {
             t.cur_cell.push(span);
             return;
-        }
-        if self.cur.is_empty() && self.quote_depth > 0 {
-            let prefix = "▎ ".repeat(self.quote_depth as usize);
-            self.cur
-                .push(Span::styled(prefix, Style::default().fg(QUOTE_COLOR)));
         }
         self.cur.push(span);
     }
@@ -214,6 +217,7 @@ impl Renderer {
             Tag::BlockQuote(_) => {
                 self.blank_line();
                 self.quote_depth += 1;
+                self.quote_starts.push(self.lines.len());
             }
             Tag::CodeBlock(kind) => {
                 self.ensure_line_break();
@@ -310,8 +314,12 @@ impl Renderer {
                 self.blank_line();
             }
             TagEnd::BlockQuote(_) => {
-                self.quote_depth = self.quote_depth.saturating_sub(1);
                 self.ensure_line_break();
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                let start = self.quote_starts.pop().unwrap_or(self.lines.len());
+                if self.quote_depth == 0 {
+                    self.emit_blockquote(start);
+                }
                 self.blank_line();
             }
             TagEnd::CodeBlock => {
@@ -375,6 +383,8 @@ impl Renderer {
         };
         let mut hl = HighlightLines::new(syntax, &self.theme);
         let width = self.width as usize;
+        let bg = Style::default().bg(CODE_BG);
+        let left_pad = Span::styled(" ".repeat(CODE_LEFT_PAD), bg);
 
         if !ctx.lang.is_empty() {
             let label = format!(" {} ", ctx.lang);
@@ -382,13 +392,12 @@ impl Renderer {
             self.lines.push(Line::from(vec![
                 Span::styled(
                     label,
-                    Style::default()
-                        .bg(CODE_BG)
-                        .fg(CODE_LANG_COLOR)
-                        .add_modifier(Modifier::BOLD),
+                    bg.fg(CODE_LANG_COLOR).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" ".repeat(pad), Style::default().bg(CODE_BG)),
+                Span::styled(" ".repeat(pad), bg),
             ]));
+        } else {
+            self.lines.push(Line::from(Span::styled(" ".repeat(width), bg)));
         }
 
         let body = if ctx.body.is_empty() { "\n" } else { &ctx.body };
@@ -397,28 +406,20 @@ impl Renderer {
             let ranges = hl
                 .highlight_line(line, &self.syntax)
                 .unwrap_or_else(|_| vec![(SynStyle::default(), line)]);
-            let mut spans: Vec<Span<'static>> = ranges
-                .into_iter()
-                .map(|(s, t)| {
-                    Span::styled(t.to_string(), syn_to_rt_style(s).bg(CODE_BG))
-                })
-                .collect();
+            let mut spans: Vec<Span<'static>> = vec![left_pad.clone()];
+            spans.extend(ranges.into_iter().map(|(s, t)| {
+                Span::styled(t.to_string(), syn_to_rt_style(s).bg(CODE_BG))
+            }));
             let content_w: usize = spans
                 .iter()
                 .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                 .sum();
             if content_w < width {
-                spans.push(Span::styled(
-                    " ".repeat(width - content_w),
-                    Style::default().bg(CODE_BG),
-                ));
+                spans.push(Span::styled(" ".repeat(width - content_w), bg));
             }
             self.lines.push(Line::from(spans));
         }
-        self.lines.push(Line::from(Span::styled(
-            " ".repeat(self.width as usize),
-            Style::default().bg(CODE_BG),
-        )));
+        self.lines.push(Line::from(Span::styled(" ".repeat(width), bg)));
         self.lines.push(Line::default());
     }
 
@@ -431,64 +432,75 @@ impl Renderer {
             return;
         }
 
-        let mut col_w: Vec<usize> = vec![0; cols];
+        let mut natural: Vec<usize> = vec![0; cols];
         for row in &ctx.rows {
             for (i, cell) in row.iter().enumerate() {
                 let w = cell_width(cell);
-                col_w[i] = col_w[i].max(w);
+                natural[i] = natural[i].max(w);
             }
         }
 
         let max_total = self.width as usize;
         let frame_overhead = cols + 1 + cols * 2;
         let avail = max_total.saturating_sub(frame_overhead);
-        let total_content: usize = col_w.iter().sum();
-        if total_content > avail && total_content > 0 {
-            let ratio = avail as f64 / total_content as f64;
-            for w in col_w.iter_mut() {
-                *w = ((*w as f64) * ratio).floor().max(3.0) as usize;
-            }
-        }
+        let mins: Vec<usize> = (0..cols)
+            .map(|ci| {
+                let header_first = ctx
+                    .rows
+                    .first()
+                    .and_then(|r| r.get(ci))
+                    .map(|cell| first_word_width(cell))
+                    .unwrap_or(0);
+                if header_first > 0 {
+                    header_first + 2
+                } else {
+                    TABLE_MIN_COL
+                }
+            })
+            .collect();
+        let col_w = fit_cols(&natural, avail, &mins);
 
         let border = Style::default().fg(RULE_COLOR);
         self.lines
             .push(make_table_border("┌", "┬", "┐", "─", &col_w, border));
 
         for (ri, row) in ctx.rows.iter().enumerate() {
-            let mut spans: Vec<Span<'static>> =
-                vec![Span::styled("│".to_string(), border)];
-            for ci in 0..cols {
-                let empty = vec![];
-                let cell = row.get(ci).unwrap_or(&empty);
-                let target = col_w[ci];
-                spans.push(Span::raw(" ".to_string()));
-                let cell_w = cell_width(cell);
-                if cell_w <= target {
-                    for s in cell {
-                        spans.push(s.clone());
-                    }
-                    spans.push(Span::raw(" ".repeat(target - cell_w + 1)));
-                } else {
-                    let truncated = truncate_spans(cell, target.saturating_sub(1));
-                    spans.extend(truncated);
-                    spans.push(Span::raw("…".to_string()));
+            let wrapped: Vec<Vec<Vec<Span<'static>>>> = (0..cols)
+                .map(|ci| {
+                    let empty: Vec<Span<'static>> = vec![];
+                    let cell = row.get(ci).unwrap_or(&empty);
+                    wrap_spans(cell, col_w[ci])
+                })
+                .collect();
+            let h = wrapped.iter().map(|c| c.len()).max().unwrap_or(1).max(1);
+
+            for vi in 0..h {
+                let mut spans: Vec<Span<'static>> =
+                    vec![Span::styled("│".to_string(), border)];
+                for ci in 0..cols {
+                    let target = col_w[ci];
                     spans.push(Span::raw(" ".to_string()));
-                }
-                spans.push(Span::styled("│".to_string(), border));
-            }
-            // header style: bold
-            if ri == 0 {
-                for s in spans.iter_mut() {
-                    if s.style.fg.is_none() && s.style.bg.is_none() {
-                        s.style = s.style.add_modifier(Modifier::BOLD);
-                    } else {
-                        s.style = s.style.add_modifier(Modifier::BOLD);
+                    let empty_line: Vec<Span<'static>> = vec![];
+                    let line = wrapped[ci].get(vi).unwrap_or(&empty_line);
+                    let line_w = cell_width(line);
+                    for s in line {
+                        let mut s = s.clone();
+                        if ri == 0 {
+                            s.style = s.style.add_modifier(Modifier::BOLD);
+                        }
+                        spans.push(s);
                     }
+                    let pad = target.saturating_sub(line_w) + 1;
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.push(Span::styled("│".to_string(), border));
                 }
+                self.lines.push(Line::from(spans));
             }
-            self.lines.push(Line::from(spans));
 
             if ri == 0 {
+                self.lines
+                    .push(make_table_border("╞", "╪", "╡", "═", &col_w, border));
+            } else if ri + 1 < ctx.rows.len() {
                 self.lines
                     .push(make_table_border("├", "┼", "┤", "─", &col_w, border));
             }
@@ -496,6 +508,73 @@ impl Renderer {
 
         self.lines
             .push(make_table_border("└", "┴", "┘", "─", &col_w, border));
+    }
+
+    fn emit_blockquote(&mut self, start: usize) {
+        if start >= self.lines.len() {
+            return;
+        }
+        let inner: Vec<Line<'static>> = self.lines.drain(start..).collect();
+        let total_w = self.width as usize;
+        let avail = total_w.saturating_sub(QUOTE_PREFIX_W);
+        let bg = Style::default().bg(QUOTE_BG);
+        let bar_style = Style::default().fg(QUOTE_COLOR).bg(QUOTE_BG);
+        let pad_row = || -> Line<'static> {
+            Line::from(vec![
+                Span::styled(QUOTE_PREFIX.to_string(), bar_style),
+                Span::styled(" ".repeat(avail), bg),
+            ])
+        };
+
+        let mut content_rows: Vec<Line<'static>> = vec![];
+        let mut emitted_any = false;
+        for line in &inner {
+            let is_blank = line
+                .spans
+                .iter()
+                .all(|s| s.content.trim().is_empty());
+            if is_blank {
+                if emitted_any {
+                    content_rows.push(pad_row());
+                }
+                continue;
+            }
+            let visual = wrap_spans(&line.spans, avail);
+            for v in visual {
+                let content_w = cell_width(&v);
+                let mut row: Vec<Span<'static>> = vec![Span::styled(
+                    QUOTE_PREFIX.to_string(),
+                    bar_style,
+                )];
+                for s in v {
+                    let fg = s.style.fg.unwrap_or(QUOTE_FG);
+                    row.push(Span::styled(
+                        s.content.into_owned(),
+                        s.style.fg(fg).bg(QUOTE_BG),
+                    ));
+                }
+                let pad = avail.saturating_sub(content_w);
+                if pad > 0 {
+                    row.push(Span::styled(" ".repeat(pad), bg));
+                }
+                content_rows.push(Line::from(row));
+                emitted_any = true;
+            }
+        }
+
+        while content_rows
+            .last()
+            .map(|l| l.spans.iter().all(|s| s.content.trim().is_empty()))
+            .unwrap_or(false)
+        {
+            content_rows.pop();
+        }
+
+        if !emitted_any {
+            return;
+        }
+        self.lines.push(pad_row());
+        self.lines.extend(content_rows);
     }
 }
 
@@ -525,33 +604,189 @@ fn cell_width(cell: &[Span<'static>]) -> usize {
         .sum()
 }
 
-fn truncate_spans(cell: &[Span<'static>], target: usize) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = vec![];
-    let mut taken = 0usize;
-    for s in cell {
-        let w = UnicodeWidthStr::width(s.content.as_ref());
-        if taken + w <= target {
-            out.push(s.clone());
-            taken += w;
-        } else {
-            let remaining = target.saturating_sub(taken);
-            let mut acc = String::new();
-            let mut acc_w = 0usize;
-            for ch in s.content.chars() {
-                let cw = UnicodeWidthStr::width(ch.to_string().as_str());
-                if acc_w + cw > remaining {
-                    break;
-                }
-                acc.push(ch);
-                acc_w += cw;
-            }
-            if !acc.is_empty() {
-                out.push(Span::styled(acc, s.style));
-            }
+fn fit_cols(natural: &[usize], avail: usize, mins: &[usize]) -> Vec<usize> {
+    let n = natural.len();
+    if n == 0 {
+        return vec![];
+    }
+    if natural.iter().sum::<usize>() <= avail {
+        return natural.to_vec();
+    }
+
+    let mut alloc = vec![0usize; n];
+    let mut locked = vec![false; n];
+    let mut remaining = avail;
+    let mut pending = n;
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| natural[i]);
+    for &i in &order {
+        if pending == 0 {
             break;
         }
+        let fair = remaining / pending;
+        if natural[i] <= fair {
+            alloc[i] = natural[i].max(mins[i].min(fair));
+            remaining = remaining.saturating_sub(alloc[i]);
+            locked[i] = true;
+            pending -= 1;
+        }
     }
-    out
+
+    if pending > 0 {
+        let unlocked_natural_sum: usize = (0..n)
+            .filter(|&i| !locked[i])
+            .map(|i| natural[i])
+            .sum();
+        for i in 0..n {
+            if locked[i] {
+                continue;
+            }
+            let share = if unlocked_natural_sum > 0 {
+                ((natural[i] as f64) * (remaining as f64) / (unlocked_natural_sum as f64))
+                    .floor() as usize
+            } else {
+                remaining / pending
+            };
+            alloc[i] = share.max(mins[i].min(remaining));
+        }
+    }
+
+    let total: usize = alloc.iter().sum();
+    if total > avail {
+        let mut over = total - avail;
+        let mut idxs: Vec<usize> = (0..n).collect();
+        idxs.sort_by_key(|&i| std::cmp::Reverse(alloc[i]));
+        for i in idxs {
+            if over == 0 {
+                break;
+            }
+            let slack = alloc[i].saturating_sub(mins[i]);
+            let take = slack.min(over);
+            alloc[i] -= take;
+            over -= take;
+        }
+    }
+
+    alloc
+}
+
+fn first_word_width(cell: &[Span<'static>]) -> usize {
+    let mut w = 0usize;
+    for s in cell {
+        for ch in s.content.chars() {
+            if ch.is_whitespace() {
+                if w > 0 {
+                    return w;
+                }
+                continue;
+            }
+            w += UnicodeWidthStr::width(ch.to_string().as_str());
+        }
+    }
+    w
+}
+
+fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![spans.to_vec()];
+    }
+
+    struct Tok {
+        text: String,
+        style: Style,
+        is_ws: bool,
+        w: usize,
+    }
+    let mut toks: Vec<Tok> = vec![];
+    for s in spans {
+        let mut buf = String::new();
+        let mut buf_ws: Option<bool> = None;
+        for ch in s.content.chars() {
+            let is_ws = ch.is_whitespace();
+            match buf_ws {
+                Some(w) if w != is_ws => {
+                    let cw = UnicodeWidthStr::width(buf.as_str());
+                    toks.push(Tok {
+                        text: std::mem::take(&mut buf),
+                        style: s.style,
+                        is_ws: w,
+                        w: cw,
+                    });
+                    buf_ws = Some(is_ws);
+                }
+                None => buf_ws = Some(is_ws),
+                _ => {}
+            }
+            buf.push(ch);
+        }
+        if let Some(w) = buf_ws {
+            let cw = UnicodeWidthStr::width(buf.as_str());
+            toks.push(Tok {
+                text: buf,
+                style: s.style,
+                is_ws: w,
+                w: cw,
+            });
+        }
+    }
+
+    let mut lines: Vec<Vec<Span<'static>>> = vec![];
+    let mut cur: Vec<Span<'static>> = vec![];
+    let mut cur_w = 0usize;
+    for t in toks {
+        if t.is_ws && cur_w == 0 {
+            continue;
+        }
+        if t.is_ws {
+            if cur_w + t.w > width {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+                continue;
+            }
+            cur.push(Span::styled(t.text, t.style));
+            cur_w += t.w;
+            continue;
+        }
+        if t.w > width {
+            let mut buf = String::new();
+            let mut bw = 0usize;
+            for ch in t.text.chars() {
+                let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+                if cur_w + bw + cw > width {
+                    if !buf.is_empty() {
+                        cur.push(Span::styled(std::mem::take(&mut buf), t.style));
+                        cur_w += bw;
+                        bw = 0;
+                    }
+                    if !cur.is_empty() {
+                        lines.push(std::mem::take(&mut cur));
+                        cur_w = 0;
+                    }
+                }
+                buf.push(ch);
+                bw += cw;
+            }
+            if !buf.is_empty() {
+                cur.push(Span::styled(buf, t.style));
+                cur_w += bw;
+            }
+            continue;
+        }
+        if cur_w + t.w > width && cur_w > 0 {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(Span::styled(t.text, t.style));
+        cur_w += t.w;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(vec![]);
+    }
+    lines
 }
 
 fn make_table_border(
