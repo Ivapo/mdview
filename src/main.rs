@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use unicode_width::UnicodeWidthStr;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
@@ -65,13 +64,13 @@ struct App {
 
 impl App {
     fn new(path: PathBuf, source: String) -> Self {
-        let raw_line_count = source.lines().count().min(u16::MAX as usize) as u16;
         let term_width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
         let content_width = DEFAULT_CONTENT_WIDTH
             .min(term_width.saturating_sub(SIDE_MARGIN))
             .max(20);
+        let raw_line_count = visual_line_count(source.as_str(), content_width);
         let rendered = render::render(&source, content_width);
-        let rendered_line_count = visual_line_count(&rendered, content_width);
+        let rendered_line_count = visual_line_count(rendered.clone(), content_width);
         Self {
             path,
             source,
@@ -114,7 +113,8 @@ impl App {
         }
         self.content_width = next;
         self.rendered = render::render(&self.source, self.content_width);
-        self.rendered_line_count = visual_line_count(&self.rendered, self.content_width);
+        self.rendered_line_count = visual_line_count(self.rendered.clone(), self.content_width);
+        self.raw_line_count = visual_line_count(self.source.as_str(), self.content_width);
         self.scroll = self
             .scroll
             .min(self.rendered_line_count.saturating_sub(1));
@@ -330,21 +330,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
     content_area.height
 }
 
-fn visual_line_count(text: &Text<'_>, width: u16) -> u16 {
-    let w = width.max(1) as usize;
-    let total: usize = text
-        .lines
-        .iter()
-        .map(|line| {
-            let span_w: usize = line
-                .spans
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            span_w.div_ceil(w).max(1)
-        })
-        .sum();
-    total.min(u16::MAX as usize) as u16
+fn visual_line_count<'a>(text: impl Into<Text<'a>>, width: u16) -> u16 {
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .min(u16::MAX as usize) as u16
 }
 
 fn center_column(area: Rect, width: u16) -> Rect {

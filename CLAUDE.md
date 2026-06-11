@@ -59,7 +59,7 @@ We replaced `tui-markdown` with a hand-rolled `pulldown-cmark`-driven renderer o
 - Code blocks use `syntect`'s default `base16-ocean.dark` theme. Each highlighted line is padded with `CODE_BG`-styled spaces to the full column so the background fills.
 - Headings h1/h2 emit a `═` / `─` underbar sized to the heading text. h3-h6 are color-only.
 - The rendered `Paragraph` still has `Wrap { trim: false }` so long plain paragraphs wrap. Tables and code blocks are pre-fit to `CONTENT_WIDTH`, so wrap shouldn't visually break them — but if you grow features, keep this invariant.
-- `rendered_line_count` (used for scroll bounds) counts logical lines, not wrapped visual lines. Scroll-to-bottom may stop slightly above the true end when paragraphs wrap. Acceptable for v1; fix with the `unstable-rendered-line-info` ratatui feature if it matters.
+- Scroll bounds (`rendered_line_count` / `raw_line_count`) are exact wrapped-line counts from `Paragraph::line_count` (ratatui's `unstable-rendered-line-info` feature), so scroll-to-bottom reaches the true end. Both counts are recomputed on width change. Max scroll is `total - (viewport - 1)`, which intentionally leaves one blank row below the last line as an end-of-content marker.
 
 Color constants are at the top of `render.rs` (`CODE_BG`, `INLINE_CODE_BG`, `LINK_COLOR`, `RULE_COLOR`, `SYNTECT_THEME`, …). Keep them there so they're easy to tweak.
 
@@ -67,7 +67,7 @@ Color constants are at the top of `render.rs` (`CODE_BG`, `INLINE_CODE_BG`, `LIN
 
 Versions pinned to current majors (June 2026):
 
-- `ratatui = "0.30"` — note the 0.30 split into `ratatui-core`/`ratatui-widgets` workspace
+- `ratatui = "0.30"` with the `unstable-rendered-line-info` feature (for `Paragraph::line_count`) — note the 0.30 split into `ratatui-core`/`ratatui-widgets` workspace
 - `crossterm = "0.29"`
 - `pulldown-cmark = "0.13"` — markdown parsing (default features off, only `html`)
 - `syntect = "5.3"` — code-block syntax highlighting (default features on; pulls `onig`)
