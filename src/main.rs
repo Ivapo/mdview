@@ -2,7 +2,7 @@ use std::{
     env, fs,
     io::{self, Stdout},
     panic,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     time::{Duration, Instant},
 };
@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        MouseEventKind,
+        MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -19,12 +19,13 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
+mod math;
 mod render;
 
 const MAX_CONTENT_WIDTH: u16 = 130;
@@ -54,12 +55,15 @@ struct App {
     path: PathBuf,
     source: String,
     rendered: Text<'static>,
+    images: Vec<render::ImageRef>,
+    image_rows: Vec<(usize, usize)>,
     content_width: u16,
     mode: Mode,
     scroll: u16,
     raw_line_count: u16,
     rendered_line_count: u16,
     status: Option<Status>,
+    hover: Option<usize>,
 }
 
 impl App {
@@ -69,22 +73,28 @@ impl App {
             .min(term_width.saturating_sub(SIDE_MARGIN))
             .max(20);
         let raw_line_count = visual_line_count(source.as_str(), content_width);
-        let rendered = render::render(&source, content_width);
+        let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
+        let (rendered, images) = render::render(&source, content_width, &base);
         let rendered_line_count = visual_line_count(rendered.clone(), content_width);
+        let image_rows = image_row_ranges(&rendered, &images, content_width);
         Self {
             path,
             source,
             rendered,
+            images,
+            image_rows,
             content_width,
             mode: Mode::Rendered,
             scroll: 0,
             raw_line_count,
             rendered_line_count,
             status: None,
+            hover: None,
         }
     }
 
     fn toggle_mode(&mut self) {
+        self.hover = None;
         self.mode = match self.mode {
             Mode::Rendered => Mode::Raw,
             Mode::Raw => Mode::Rendered,
@@ -112,7 +122,12 @@ impl App {
             return;
         }
         self.content_width = next;
-        self.rendered = render::render(&self.source, self.content_width);
+        let base = self.path.parent().unwrap_or(Path::new("")).to_path_buf();
+        let (rendered, images) = render::render(&self.source, self.content_width, &base);
+        self.rendered = rendered;
+        self.images = images;
+        self.image_rows =
+            image_row_ranges(&self.rendered, &self.images, self.content_width);
         self.rendered_line_count = visual_line_count(self.rendered.clone(), self.content_width);
         self.raw_line_count = visual_line_count(self.source.as_str(), self.content_width);
         self.scroll = self
@@ -131,8 +146,78 @@ impl App {
             Mode::Raw => self.raw_line_count,
         };
         let max = total.saturating_sub(viewport_height.max(1).saturating_sub(1));
-        let next = (self.scroll as i32 + delta).clamp(0, max as i32);
+        let next = (self.scroll as i32).saturating_add(delta).clamp(0, max as i32);
         self.scroll = next as u16;
+        self.hover = None;
+    }
+
+    fn open_image(&mut self, idx: usize) {
+        let dest = self.images[idx].dest.clone();
+        let (text, error) = self.launch_open(&dest);
+        self.status = Some(Status {
+            text,
+            until: Instant::now() + STATUS_TTL,
+            error,
+        });
+    }
+
+    fn launch_open(&self, dest: &str) -> (String, bool) {
+        let arg = if dest.starts_with("http://") || dest.starts_with("https://") {
+            dest.to_string()
+        } else {
+            let p = Path::new(dest);
+            let resolved = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                self.path.parent().unwrap_or(Path::new("")).join(p)
+            };
+            if !resolved.exists() {
+                return (format!("not found: {dest}"), true);
+            }
+            resolved.display().to_string()
+        };
+        match process::Command::new("open").arg(&arg).spawn() {
+            Ok(_) => (format!("opened {dest}"), false),
+            Err(e) => (format!("open failed: {e}"), true),
+        }
+    }
+
+    fn open_image_below(&mut self) {
+        if self.mode != Mode::Rendered {
+            self.status = Some(Status {
+                text: "images open from rendered view (tab)".to_string(),
+                until: Instant::now() + STATUS_TTL,
+                error: false,
+            });
+            return;
+        }
+        let scroll = self.scroll as usize;
+        match self.image_rows.iter().position(|&(_, end)| end > scroll) {
+            Some(i) => self.open_image(i),
+            None => {
+                self.status = Some(Status {
+                    text: "no image below".to_string(),
+                    until: Instant::now() + STATUS_TTL,
+                    error: false,
+                });
+            }
+        }
+    }
+
+    fn image_at(&self, column: u16, row: u16, area: Rect) -> Option<usize> {
+        if self.mode != Mode::Rendered || !area.contains(Position::new(column, row)) {
+            return None;
+        }
+        let visual = self.scroll as usize + (row - area.y) as usize;
+        self.image_rows
+            .iter()
+            .position(|&(start, end)| start <= visual && visual < end)
+    }
+
+    fn click(&mut self, column: u16, row: u16, area: Rect) {
+        if let Some(i) = self.image_at(column, row, area) {
+            self.open_image(i);
+        }
     }
 
     fn yank_path(&mut self) {
@@ -210,11 +295,12 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
 ) -> Result<()> {
-    let mut viewport_height: u16 = 1;
+    let mut content_area = Rect::default();
     loop {
         terminal.draw(|frame| {
-            viewport_height = draw(frame, app);
+            content_area = draw(frame, app);
         })?;
+        let viewport_height = content_area.height;
 
         if !event::poll(Duration::from_millis(250))? {
             continue;
@@ -224,6 +310,7 @@ fn event_loop(
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Tab => app.toggle_mode(),
                 KeyCode::Char('y') => app.yank_path(),
+                KeyCode::Char('o') => app.open_image_below(),
                 KeyCode::Char('-') => app.adjust_width(-(WIDTH_STEP as i32)),
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     app.adjust_width(WIDTH_STEP as i32)
@@ -251,6 +338,12 @@ fn event_loop(
                 MouseEventKind::ScrollUp => {
                     app.scroll_by(-3, viewport_height);
                 }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    app.click(m.column, m.row, content_area);
+                }
+                MouseEventKind::Moved => {
+                    app.hover = app.image_at(m.column, m.row, content_area);
+                }
                 _ => {}
             },
             _ => {}
@@ -258,7 +351,7 @@ fn event_loop(
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
+fn draw(frame: &mut ratatui::Frame, app: &App) -> Rect {
     let area = frame.area();
 
     let title = Line::from(vec![
@@ -289,6 +382,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
         Span::styled(" width  ", hint),
         Span::styled("y", key),
         Span::styled(" copy path  ", hint),
+        Span::styled("o", key),
+        Span::styled(" image  ", hint),
         Span::styled("q", key),
         Span::styled(" quit ", hint),
     ];
@@ -297,6 +392,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
         bottom_spans.push(Span::styled(
             format!(" • {} ", status.text),
             Style::default().fg(color),
+        ));
+    } else if let Some(i) = app.hover {
+        bottom_spans.push(Span::styled(
+            format!(" • click: {} ", app.images[i].dest),
+            Style::default().fg(TITLE_COLOR),
         ));
     }
     let bottom = Line::from(bottom_spans);
@@ -327,7 +427,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> u16 {
         }
     }
 
-    content_area.height
+    content_area
 }
 
 fn visual_line_count<'a>(text: impl Into<Text<'a>>, width: u16) -> u16 {
@@ -335,6 +435,36 @@ fn visual_line_count<'a>(text: impl Into<Text<'a>>, width: u16) -> u16 {
         .wrap(Wrap { trim: false })
         .line_count(width.max(1))
         .min(u16::MAX as usize) as u16
+}
+
+// ratatui wraps each Line independently, so per-line counts sum to exact visual offsets
+fn image_row_ranges(
+    text: &Text<'static>,
+    images: &[render::ImageRef],
+    width: u16,
+) -> Vec<(usize, usize)> {
+    if images.is_empty() {
+        return vec![];
+    }
+    let mut offsets = Vec::with_capacity(text.lines.len() + 1);
+    let mut acc = 0usize;
+    offsets.push(0);
+    for line in &text.lines {
+        acc += visual_line_count(line.clone(), width) as usize;
+        offsets.push(acc);
+    }
+    images
+        .iter()
+        .map(|img| {
+            let start = offsets.get(img.lines.0).copied().unwrap_or(acc);
+            let end = offsets
+                .get(img.lines.1)
+                .copied()
+                .unwrap_or(acc)
+                .max(start + 1);
+            (start, end)
+        })
+        .collect()
 }
 
 fn center_column(area: Rect, width: u16) -> Rect {

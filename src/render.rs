@@ -1,3 +1,6 @@
+use std::path::{Path, PathBuf};
+
+use image::imageops::FilterType;
 use pulldown_cmark::{
     Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
@@ -27,17 +30,25 @@ const QUOTE_PREFIX: &str = "▎ ";
 const QUOTE_PREFIX_W: usize = 2;
 const TABLE_MIN_COL: usize = 3;
 const CODE_LEFT_PAD: usize = 2;
+const IMAGE_WIDTH_PCT: u32 = 80;
+const MATH_COLOR: Color = Color::Rgb(186, 200, 255);
 
-pub fn render(source: &str, width: u16) -> Text<'static> {
+pub struct ImageRef {
+    pub lines: (usize, usize),
+    pub dest: String,
+}
+
+pub fn render(source: &str, width: u16, base: &Path) -> (Text<'static>, Vec<ImageRef>) {
     let parser = Parser::new_ext(
         source,
         Options::ENABLE_TABLES
             | Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_FOOTNOTES
-            | Options::ENABLE_SMART_PUNCTUATION,
+            | Options::ENABLE_SMART_PUNCTUATION
+            | Options::ENABLE_MATH,
     );
-    let mut r = Renderer::new(width);
+    let mut r = Renderer::new(width, base.to_path_buf());
     for ev in parser {
         r.event(ev);
     }
@@ -56,6 +67,8 @@ struct Renderer {
     code: Option<CodeCtx>,
     table: Option<TableCtx>,
     item_pending: bool,
+    images: Vec<ImageRef>,
+    base: PathBuf,
     syntax: SyntaxSet,
     theme: Theme,
 }
@@ -73,7 +86,7 @@ struct TableCtx {
 }
 
 impl Renderer {
-    fn new(width: u16) -> Self {
+    fn new(width: u16, base: PathBuf) -> Self {
         let syntax = SyntaxSet::load_defaults_newlines();
         let theme = ThemeSet::load_defaults().themes[SYNTECT_THEME].clone();
         Self {
@@ -88,16 +101,18 @@ impl Renderer {
             code: None,
             table: None,
             item_pending: false,
+            images: vec![],
+            base,
             syntax,
             theme,
         }
     }
 
-    fn finish(mut self) -> Text<'static> {
+    fn finish(mut self) -> (Text<'static>, Vec<ImageRef>) {
         if !self.cur.is_empty() {
             self.flush_line();
         }
-        Text::from(self.lines)
+        (Text::from(self.lines), self.images)
     }
 
     fn push_style(&mut self, add: Style) {
@@ -154,6 +169,14 @@ impl Renderer {
             Event::End(tag) => self.end(tag),
             Event::Text(t) => self.text(&t),
             Event::Code(c) => self.inline_code(&c),
+            Event::InlineMath(m) => {
+                let t = crate::math::tex_to_unicode(&m).replace('\n', " ");
+                let style = self
+                    .style
+                    .patch(Style::default().fg(MATH_COLOR).add_modifier(Modifier::ITALIC));
+                self.push_span(Span::styled(t, style));
+            }
+            Event::DisplayMath(m) => self.display_math(&m),
             Event::Html(_) | Event::InlineHtml(_) => {}
             Event::FootnoteReference(name) => {
                 self.push_text(&format!("[^{name}]"));
@@ -184,7 +207,6 @@ impl Renderer {
                 let mark = if b { "[x] " } else { "[ ] " };
                 self.push_text(mark);
             }
-            _ => {}
         }
     }
 
@@ -266,6 +288,16 @@ impl Renderer {
                     .add_modifier(Modifier::UNDERLINED),
             ),
             Tag::Image { dest_url, .. } => {
+                if self.table.is_none() {
+                    let start = self.lines.len();
+                    if self.quote_depth == 0 && self.cur.is_empty() {
+                        self.emit_halfblock_image(&dest_url);
+                    }
+                    self.images.push(ImageRef {
+                        lines: (start, self.lines.len() + 1),
+                        dest: dest_url.to_string(),
+                    });
+                }
                 self.push_text(&format!("[image: {dest_url}]"));
                 self.push_style(Style::default().fg(Color::DarkGray));
             }
@@ -287,6 +319,9 @@ impl Renderer {
     fn end(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::Paragraph => {
+                if self.lists.is_empty() && self.quote_depth == 0 && self.table.is_none() {
+                    self.justify_flush();
+                }
                 self.ensure_line_break();
                 self.blank_line();
             }
@@ -510,7 +545,99 @@ impl Renderer {
             .push(make_table_border("└", "┴", "┘", "─", &col_w, border));
     }
 
+    fn display_math(&mut self, tex: &str) {
+        let t = crate::math::tex_to_unicode(tex);
+        if self.table.is_some() {
+            let style = Style::default().fg(MATH_COLOR);
+            self.push_span(Span::styled(t.replace('\n', " "), style));
+            return;
+        }
+        self.ensure_line_break();
+        let width = self.width as usize;
+        let style = Style::default().fg(MATH_COLOR);
+        for part in t.split('\n') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let span = Span::styled(part.to_string(), style);
+            for line in wrap_spans(&[span], width) {
+                let pad = width.saturating_sub(cell_width(&line)) / 2;
+                let mut spans = line;
+                if pad > 0 {
+                    spans.insert(0, Span::raw(" ".repeat(pad)));
+                }
+                self.lines.push(Line::from(spans));
+            }
+        }
+    }
+
+    // pre-wraps the buffered paragraph and pads spaces so every line but the last
+    // fills the column exactly; segments flushed early by hard breaks stay ragged
+    fn justify_flush(&mut self) {
+        let spans = std::mem::take(&mut self.cur);
+        if spans.is_empty() {
+            return;
+        }
+        let width = self.width as usize;
+        let old_len = self.lines.len();
+        let wrapped = wrap_spans(&spans, width);
+        let n = wrapped.len();
+        for (i, mut line) in wrapped.into_iter().enumerate() {
+            if i + 1 < n {
+                justify_line(&mut line, width);
+            }
+            self.lines.push(Line::from(line));
+        }
+        // refs from this paragraph assumed it would flush as one line; widen to reality
+        let new_len = self.lines.len();
+        for img in &mut self.images {
+            if img.lines.1 == old_len + 1 && img.lines.0 <= old_len {
+                img.lines.1 = new_len;
+            }
+        }
+    }
+
+    // one cell = 1 pixel wide, 2 pixels tall: ▀ fg is the top pixel, bg the bottom
+    fn emit_halfblock_image(&mut self, dest: &str) {
+        if dest.starts_with("http://") || dest.starts_with("https://") {
+            return;
+        }
+        let p = Path::new(dest);
+        let path = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.base.join(p)
+        };
+        let Ok(img) = image::open(&path) else { return };
+        let (ow, oh) = (img.width(), img.height());
+        if ow == 0 || oh == 0 {
+            return;
+        }
+        let tw = (self.width as u32 * IMAGE_WIDTH_PCT / 100).min(ow).max(1);
+        let th = (oh * tw / ow).max(1);
+        let rgba = img.resize_exact(tw, th, FilterType::Triangle).to_rgba8();
+        let pad = (self.width as usize).saturating_sub(tw as usize) / 2;
+        for y in (0..th).step_by(2) {
+            let mut spans: Vec<Span<'static>> = vec![];
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            for x in 0..tw {
+                let style = if y + 1 < th {
+                    Style::default().fg(px(&rgba, x, y)).bg(px(&rgba, x, y + 1))
+                } else {
+                    Style::default().fg(px(&rgba, x, y))
+                };
+                spans.push(Span::styled("▀".to_string(), style));
+            }
+            self.lines.push(Line::from(spans));
+        }
+    }
+
     fn emit_blockquote(&mut self, start: usize) {
+        // quote lines get re-wrapped below, so line indices recorded inside are void
+        self.images.retain(|img| img.lines.0 < start);
         if start >= self.lines.len() {
             return;
         }
@@ -588,6 +715,50 @@ fn heading_style(level: HeadingLevel) -> Style {
         HeadingLevel::H5 => base.fg(Color::Blue),
         HeadingLevel::H6 => base.fg(Color::Gray),
     }
+}
+
+fn justify_line(line: &mut Vec<Span<'static>>, width: usize) {
+    while line
+        .last()
+        .map(|s| s.content.chars().all(char::is_whitespace))
+        .unwrap_or(false)
+    {
+        line.pop();
+    }
+    let w = cell_width(line);
+    if w >= width {
+        return;
+    }
+    let gaps: Vec<usize> = line
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            !s.content.is_empty() && s.content.chars().all(char::is_whitespace)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if gaps.is_empty() {
+        return;
+    }
+    let deficit = width - w;
+    let per = deficit / gaps.len();
+    let mut rem = deficit % gaps.len();
+    for &i in &gaps {
+        let extra = per + if rem > 0 { rem -= 1; 1 } else { 0 };
+        if extra > 0 {
+            line[i].content.to_mut().push_str(&" ".repeat(extra));
+        }
+    }
+}
+
+fn px(img: &image::RgbaImage, x: u32, y: u32) -> Color {
+    let p = img.get_pixel(x, y);
+    let a = p[3] as u16;
+    Color::Rgb(
+        (p[0] as u16 * a / 255) as u8,
+        (p[1] as u16 * a / 255) as u8,
+        (p[2] as u16 * a / 255) as u8,
+    )
 }
 
 fn syn_to_rt_style(s: SynStyle) -> Style {

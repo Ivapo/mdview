@@ -13,6 +13,8 @@ mdview notes.md
 
 Renders a single markdown file in a centered, fixed-width column inside the alternate screen. Toggle between the rendered view and the raw source with `Tab`. Scroll with the trackpad/mouse wheel, or with `j`/`k` and arrow keys.
 
+Body paragraphs are justified to the column width. Standalone images render inline as half-block (`▀`) pixel previews at 80% of the column width — press `o` or click one (the bottom bar shows `click: <file>` while hovering) to open the original in your system viewer. LaTeX math renders as Unicode: `$\gamma^d$` → *γᵈ*, `$h_{\min}$` → *hₘᵢₙ*, `\mathbb{E}[S]` → 𝔼[S], with `$$…$$` display equations centered on their own line. Complex TeX degrades to readable linear form (`\frac{a}{b}` → `(a)/(b)`) rather than raw source.
+
 ## Install
 
 ```sh
@@ -43,6 +45,8 @@ cargo build --release
 | `G` / `End`         | Jump to bottom                          |
 | Mouse wheel         | Scroll                                  |
 | `-` / `+`           | Narrow / widen the content column       |
+| `o`                 | Open first visible image in system viewer |
+| Left-click on image | Open that image in system viewer        |
 | `y`                 | Copy the file path to the clipboard     |
 | `q` / `Esc`         | Quit                                    |
 
@@ -67,11 +71,12 @@ Startup column = `min(DEFAULT_CONTENT_WIDTH, terminal_width - SIDE_MARGIN)`. Adj
 - [`ratatui`](https://crates.io/crates/ratatui) + [`crossterm`](https://crates.io/crates/crossterm) — TUI rendering and input
 - [`pulldown-cmark`](https://crates.io/crates/pulldown-cmark) — CommonMark parser
 - [`syntect`](https://crates.io/crates/syntect) — code-block syntax highlighting
+- [`image`](https://crates.io/crates/image) — decoding for half-block image previews
 - [`unicode-width`](https://crates.io/crates/unicode-width) — cell widths for table layout
 - [`arboard`](https://crates.io/crates/arboard) — clipboard
 - [`anyhow`](https://crates.io/crates/anyhow) — error handling
 
-The markdown renderer is a hand-rolled walk over the pulldown-cmark event stream — see `src/render.rs`. It handles headings (with `═`/`─` underbars on h1/h2), bold/italic/strikethrough/links, inline code, fenced code blocks (syntect-highlighted with a dark background and a language tag), ordered and unordered lists with nesting, blockquotes with a left bar, horizontal rules, and tables with box-drawing borders that shrink columns to fit the content width.
+The markdown renderer is a hand-rolled walk over the pulldown-cmark event stream — see `src/render.rs`. It handles headings (with `═`/`─` underbars on h1/h2), bold/italic/strikethrough/links, inline code, fenced code blocks (syntect-highlighted with a dark background and a language tag), ordered and unordered lists with nesting, blockquotes with a left bar, horizontal rules, tables with box-drawing borders that shrink columns to fit the content width, justified paragraphs, half-block image previews, and TeX math via a small hand-rolled converter (`src/math.rs`).
 
 ## License
 
