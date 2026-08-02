@@ -9,11 +9,16 @@ A minimal terminal markdown reader written in Rust. Published on crates.io as [`
 mdview notes.md
 ```
 
+```
+mdview --help       # usage
+mdview --version    # version
+```
+
 ## What it does
 
-Renders a single markdown file in a centered, fixed-width column inside the alternate screen. Toggle between the rendered view and the raw source with `Tab`. Scroll with the trackpad/mouse wheel, or with `j`/`k` and arrow keys.
+Renders a single markdown file in a centered, fixed-width column inside the alternate screen. Toggle between the rendered view and the raw source with `Tab`. Scroll with the trackpad/mouse wheel, or with `j`/`k` and arrow keys — a thumb on the right border tracks your position. Press `?` for the full key list.
 
-Body paragraphs are justified to the column width. Standalone images render inline as half-block (`▀`) pixel previews at 80% of the column width — press `o` or click one (the bottom bar shows `click: <file>` while hovering) to open the original in your system viewer. LaTeX math renders as Unicode: `$\gamma^d$` → *γᵈ*, `$h_{\min}$` → *hₘᵢₙ*, `\mathbb{E}[S]` → 𝔼[S], with `$$…$$` display equations centered on their own line. Complex TeX degrades to readable linear form (`\frac{a}{b}` → `(a)/(b)`) rather than raw source.
+YAML front matter — the `---`-delimited block some files open with — renders as an aligned key/value header with a rule under it, not as markdown. Body paragraphs are justified to the column width. Standalone images render inline as half-block (`▀`) pixel previews at 80% of the column width — press `o` or click one (the bottom bar shows `click: <file>` while hovering) to open the original in your system viewer. LaTeX math renders as Unicode: `$\gamma^d$` → *γᵈ*, `$h_{\min}$` → *hₘᵢₙ*, `\mathbb{E}[S]` → 𝔼[S], with `$$…$$` display equations centered on their own line. Complex TeX degrades to readable linear form (`\frac{a}{b}` → `(a)/(b)`) rather than raw source.
 
 ## Install
 
@@ -48,6 +53,7 @@ cargo build --release
 | `o`                 | Open first visible image in system viewer |
 | Left-click on image | Open that image in system viewer        |
 | `y`                 | Copy the file path to the clipboard     |
+| `?`                 | Toggle the keybinding overlay           |
 | `q` / `Esc`         | Quit                                    |
 
 ## Tweaks

@@ -46,9 +46,18 @@ Constants at the top of `src/main.rs` are intentionally there so the user can ed
 - `MAX_CONTENT_WIDTH` / `MIN_CONTENT_WIDTH` / `DEFAULT_CONTENT_WIDTH` — bounds and startup target. Startup uses `min(DEFAULT_CONTENT_WIDTH, term_width - SIDE_MARGIN)`, stored on `App.content_width`. `-`/`+` keys call `App::adjust_width(±WIDTH_STEP)` which clamps to `[MIN, min(MAX, term_width - SIDE_MARGIN)]`, re-renders the cached `Text`, and reclamps scroll. Each adjustment re-queries `crossterm::terminal::size()` so the cap tracks terminal resizes between presses, but the initial render does not re-flow on bare resize events.
 - `SIDE_MARGIN` — left+right breathing room subtracted from terminal width
 - `WIDTH_STEP` — cells per `-`/`+` press
-- `FRAME_COLOR` — border + bottom-hint color
-- `TITLE_COLOR` — filename color and status-success color
+- `FRAME_COLOR` — border, bottom-hint, and scroll-thumb color
+- `TITLE_COLOR` — filename color, status-success color, `?` overlay accent
+- `BRAND` / `BRAND_COLOR` — bottom-right footer text and its amber (matching panex-tui); the leading spaces keep a clipped status off it
+- `SCROLL_THUMB` — scroll-thumb glyph
 - `SCROLL_STEP`, `PAGE_STEP`, `STATUS_TTL` — self-explanatory
+
+## Shell details (`src/main.rs`)
+
+- `parse_args` handles `-h/--help` and `-V/--version` by printing and `process::exit(0)` before the terminal enters raw mode, so `run` only ever sees a real path. Anything else starting with `-` is rejected. Still no `clap`.
+- The footer (hints on the left, `BRAND` on the right) is drawn as two `Paragraph`s over the block's bottom border row rather than as two `title_bottom`s: ratatui renders right-aligned titles *before* left-aligned ones, so a long status would paint over the brand. The split rect clips the status instead.
+- `render_scroll_thumb` is hand-rolled (same reasoning as panex-tui): `ratatui::Scrollbar` rounds the thumb's start and end independently, so the thumb visibly resizes by a cell mid-scroll. Length is computed once, only the position moves. It's drawn over the outer right border, spanning the content viewport rows only (not the block's vertical padding). Note `scroll_by` clamps to `total - (viewport - 1)`, one past the thumb's `max_offset = len - viewport`; the `offset.min(max_offset)` keeps it flush at the bottom.
+- `App.help` drives the `?` overlay. While it's set the event loop swallows every key but `Esc`/`Enter`/`q`/`?` (which close it) and ignores mouse events entirely, so `q` can't quit out from under the overlay. Key lists live in `render_help` — update them when you add a binding, and the footer hint too if it's a common one.
 
 ## Renderer (`src/render.rs`)
 
@@ -56,6 +65,7 @@ We replaced `tui-markdown` with a hand-rolled `pulldown-cmark`-driven renderer o
 
 - `render(source, width, base) -> (Text<'static>, Vec<ImageRef>)` is the only public entry. Width matters because tables, code-block backgrounds, and images pre-fit to it; `base` is the `.md` file's directory, used to resolve image paths. `App` calls this once at startup and caches the result (no per-frame re-parse). Each `ImageRef` is `{ lines: (start, end), dest }` — a half-open range into the returned `Text` covering the image's pixel rows plus its caption line. Images inside blockquotes are dropped (the quote re-wrap invalidates indices) and images inside table cells are never recorded.
 - Standalone images (own paragraph, not in quote/table) render as half-block pixel rows: each cell is `▀` with fg = top pixel, bg = bottom pixel, so 1 cell = 1×2 pixels. Downscaled to `IMAGE_WIDTH_PCT` (80%) of content width (`resize_exact`, Triangle filter), centered, alpha composited over black, with the dimmed `[image: dest]` caption kept underneath as the click target. Inline/quote/table images and failed decodes fall back to the caption-only placeholder. Decoding happens on every render, i.e. also on each width change — fine for paper-sized docs, revisit with a decoded-image cache if it ever feels slow.
+- YAML front matter (`Options::ENABLE_YAML_STYLE_METADATA_BLOCKS`) arrives as `Tag::MetadataBlock`, buffered into `Renderer.meta` the same way code blocks buffer into `CodeCtx`, and emitted by `emit_metadata` as an aligned key/value header (dark-gray keys, green values, `─` rule underneath) — it's metadata *about* the file, not content. Without the option pulldown-cmark reads the opening `---` as a thematic break and the closing one as a setext h2, which turned the whole block into a rule + run-together paragraph. `split_meta_key` only splits top-level scalar keys; lines starting with space/tab/`-`/`#` stay verbatim under the value column so nested structures keep their shape. A `---` anywhere else in the document is still `Event::Rule`, and an unterminated leading `---` still parses as a rule.
 - Math (`Options::ENABLE_MATH`): `$…$` renders inline via `math::tex_to_unicode`, italic in `MATH_COLOR`; `$$…$$` becomes its own centered line(s) (split on `\\`, wrapped if over width). Display math inside a table cell degrades to an inline span.
 - Top-level paragraphs are justified: `justify_flush` pre-wraps the buffered paragraph with `wrap_spans` and pads the whitespace gaps so every line but the last is exactly content width (so the `Paragraph` `Wrap` never re-wraps them). Lists, quotes, headings, and segments cut off by hard breaks stay ragged-right. `justify_flush` also widens `ImageRef` ranges recorded inside the paragraph to cover all its wrapped lines.
 - `Renderer` holds: current line buffer (`cur`), a style stack (so nested emphasis composes), a list-context stack (for ordered counters / nesting depth), `quote_depth`, and `Option<CodeCtx>` / `Option<TableCtx>` for buffered block constructs.

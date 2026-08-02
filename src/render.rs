@@ -32,6 +32,9 @@ const TABLE_MIN_COL: usize = 3;
 const CODE_LEFT_PAD: usize = 2;
 const IMAGE_WIDTH_PCT: u32 = 80;
 const MATH_COLOR: Color = Color::Rgb(186, 200, 255);
+const META_KEY_COLOR: Color = Color::DarkGray;
+const META_VALUE_COLOR: Color = Color::Green;
+const META_GAP: usize = 2;
 
 pub struct ImageRef {
     pub lines: (usize, usize),
@@ -46,7 +49,8 @@ pub fn render(source: &str, width: u16, base: &Path) -> (Text<'static>, Vec<Imag
             | Options::ENABLE_TASKLISTS
             | Options::ENABLE_FOOTNOTES
             | Options::ENABLE_SMART_PUNCTUATION
-            | Options::ENABLE_MATH,
+            | Options::ENABLE_MATH
+            | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS,
     );
     let mut r = Renderer::new(width, base.to_path_buf());
     for ev in parser {
@@ -65,6 +69,7 @@ struct Renderer {
     quote_depth: u16,
     quote_starts: Vec<usize>,
     code: Option<CodeCtx>,
+    meta: Option<String>,
     table: Option<TableCtx>,
     item_pending: bool,
     images: Vec<ImageRef>,
@@ -99,6 +104,7 @@ impl Renderer {
             quote_depth: 0,
             quote_starts: vec![],
             code: None,
+            meta: None,
             table: None,
             item_pending: false,
             images: vec![],
@@ -215,6 +221,10 @@ impl Renderer {
             c.body.push_str(t);
             return;
         }
+        if let Some(m) = self.meta.as_mut() {
+            m.push_str(t);
+            return;
+        }
         self.push_text(t);
     }
 
@@ -253,6 +263,7 @@ impl Renderer {
                     body: String::new(),
                 });
             }
+            Tag::MetadataBlock(_) => self.meta = Some(String::new()),
             Tag::List(start) => {
                 if self.lists.is_empty() {
                     self.ensure_line_break();
@@ -363,6 +374,12 @@ impl Renderer {
                 }
                 self.blank_line();
             }
+            TagEnd::MetadataBlock(_) => {
+                if let Some(raw) = self.meta.take() {
+                    self.emit_metadata(&raw);
+                }
+                self.blank_line();
+            }
             TagEnd::List(_) => {
                 self.lists.pop();
                 if self.lists.is_empty() {
@@ -406,6 +423,59 @@ impl Renderer {
             }
             _ => {}
         }
+    }
+
+    /// YAML front matter is metadata *about* the file, not content, so it gets
+    /// an aligned key/value header rather than the `---` rules and run-together
+    /// paragraph plain markdown parsing would give it. Only top-level scalar
+    /// keys are split; nested lines keep their shape under the value column.
+    fn emit_metadata(&mut self, raw: &str) {
+        let rows: Vec<(Option<String>, String)> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| match split_meta_key(l) {
+                Some((k, v)) => (Some(k.to_string()), v.to_string()),
+                None => (None, l.trim_end().to_string()),
+            })
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+
+        let key_w = rows
+            .iter()
+            .filter_map(|(k, _)| k.as_deref())
+            .map(UnicodeWidthStr::width)
+            .max()
+            .unwrap_or(0);
+        let value_col = key_w + META_GAP;
+        let value_w = (self.width as usize).saturating_sub(value_col).max(1);
+
+        let indent = " ".repeat(value_col);
+        let gap = " ".repeat(META_GAP);
+        for (key, value) in rows {
+            let head = match &key {
+                Some(k) => format!("{k:<key_w$}{gap}"),
+                None => indent.clone(),
+            };
+            let value_style = Style::default().fg(if key.is_some() {
+                META_VALUE_COLOR
+            } else {
+                QUOTE_COLOR
+            });
+            let wrapped = wrap_spans(&[Span::styled(value, value_style)], value_w);
+            for (i, mut spans) in wrapped.into_iter().enumerate() {
+                let lead = if i == 0 { head.clone() } else { indent.clone() };
+                let mut line = vec![Span::styled(lead, Style::default().fg(META_KEY_COLOR))];
+                line.append(&mut spans);
+                self.lines.push(Line::from(line));
+            }
+        }
+
+        self.lines.push(Line::from(Span::styled(
+            "─".repeat(self.width as usize),
+            Style::default().fg(RULE_COLOR),
+        )));
     }
 
     fn emit_code_block(&mut self, ctx: &CodeCtx) {
@@ -840,6 +910,20 @@ fn fit_cols(natural: &[usize], avail: usize, mins: &[usize]) -> Vec<usize> {
     }
 
     alloc
+}
+
+/// `key: value` for a top-level scalar key only. Indented lines and `-` items
+/// belong to a nested structure, and splitting those would misalign them under
+/// a key they aren't a sibling of.
+fn split_meta_key(line: &str) -> Option<(&str, &str)> {
+    if line.starts_with([' ', '\t', '-', '#']) {
+        return None;
+    }
+    let (key, value) = line.split_once(':')?;
+    if key.is_empty() {
+        return None;
+    }
+    Some((key, value.trim()))
 }
 
 fn first_word_width(cell: &[Span<'static>]) -> usize {

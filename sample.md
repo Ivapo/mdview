@@ -1,3 +1,11 @@
+---
+title: mdview sample
+author: ivapo
+date: 2026-08-01
+tags: [markdown, tui, rendering]
+draft: false
+---
+
 # mdview sample
 
 A minimal terminal markdown reader with a hand-rolled renderer.
@@ -36,6 +44,19 @@ def fib(n):
     for _ in range(n):
         a, b = b, a + b
     return a
+```
+
+```yaml
+name: mdview
+version: 0.3.0
+keys:
+  - key: "?"
+    action: show keybindings
+  - key: tab
+    action: toggle raw view
+frame:
+  color: darkgray   # anchors, quotes, and comments should all be distinct
+  brand: true
 ```
 
 ```

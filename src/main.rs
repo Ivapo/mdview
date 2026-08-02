@@ -22,7 +22,7 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Padding, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
 mod math;
@@ -38,6 +38,13 @@ const WIDTH_STEP: u16 = 4;
 const FRAME_COLOR: Color = Color::DarkGray;
 const TITLE_COLOR: Color = Color::Green;
 const STATUS_TTL: Duration = Duration::from_secs(2);
+/// Padded so a footer hint clipped at the column edge can't butt up against it.
+const BRAND: &str = "  mdview ";
+/// Amber, matching panex-tui's footer brand.
+const BRAND_COLOR: Color = Color::Rgb(255, 191, 0);
+/// Half-width so it reads lighter than a full block while staying distinct
+/// from the `│` border it is drawn over.
+const SCROLL_THUMB: &str = "▐";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
@@ -64,6 +71,7 @@ struct App {
     rendered_line_count: u16,
     status: Option<Status>,
     hover: Option<usize>,
+    help: bool,
 }
 
 impl App {
@@ -90,6 +98,14 @@ impl App {
             rendered_line_count,
             status: None,
             hover: None,
+            help: false,
+        }
+    }
+
+    fn line_count(&self) -> u16 {
+        match self.mode {
+            Mode::Rendered => self.rendered_line_count,
+            Mode::Raw => self.raw_line_count,
         }
     }
 
@@ -99,11 +115,7 @@ impl App {
             Mode::Rendered => Mode::Raw,
             Mode::Raw => Mode::Rendered,
         };
-        let total = match self.mode {
-            Mode::Rendered => self.rendered_line_count,
-            Mode::Raw => self.raw_line_count,
-        };
-        self.scroll = self.scroll.min(total.saturating_sub(1));
+        self.scroll = self.scroll.min(self.line_count().saturating_sub(1));
     }
 
     fn adjust_width(&mut self, delta: i32) {
@@ -141,11 +153,9 @@ impl App {
     }
 
     fn scroll_by(&mut self, delta: i32, viewport_height: u16) {
-        let total = match self.mode {
-            Mode::Rendered => self.rendered_line_count,
-            Mode::Raw => self.raw_line_count,
-        };
-        let max = total.saturating_sub(viewport_height.max(1).saturating_sub(1));
+        let max = self
+            .line_count()
+            .saturating_sub(viewport_height.max(1).saturating_sub(1));
         let next = (self.scroll as i32).saturating_add(delta).clamp(0, max as i32);
         self.scroll = next as u16;
         self.hover = None;
@@ -259,15 +269,48 @@ fn run() -> Result<()> {
     result
 }
 
+/// Handles `--help`/`--version` before the terminal goes into raw mode; both
+/// print and exit rather than returning, so `run` only ever sees a real path.
 fn parse_args() -> Result<PathBuf> {
     let mut args = env::args_os().skip(1);
     let Some(arg) = args.next() else {
-        bail!("usage: mdview <file.md>");
+        bail!("usage: mdview <file.md>  (try --help)");
     };
+    match arg.to_str() {
+        Some("-h" | "-H" | "--help") => {
+            print_help();
+            process::exit(0);
+        }
+        Some("-V" | "-v" | "--version") => {
+            println!("mdview {}", env!("CARGO_PKG_VERSION"));
+            process::exit(0);
+        }
+        Some(other) if other.starts_with('-') => {
+            bail!("unrecognized argument '{other}' (try --help)");
+        }
+        _ => {}
+    }
     if args.next().is_some() {
-        bail!("usage: mdview <file.md>");
+        bail!("usage: mdview <file.md>  (try --help)");
     }
     Ok(PathBuf::from(arg))
+}
+
+fn print_help() {
+    println!(
+        "mdview {version}
+A minimal terminal markdown reader.
+
+USAGE:
+    mdview <file.md>
+
+OPTIONS:
+    -h, --help       Print this help
+    -V, --version    Print version
+
+Press ? inside the app for keyboard shortcuts.",
+        version = env!("CARGO_PKG_VERSION"),
+    );
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -306,8 +349,17 @@ fn event_loop(
             continue;
         }
         match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press && app.help => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
+                ) {
+                    app.help = false;
+                }
+            }
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('?') => app.help = true,
                 KeyCode::Tab => app.toggle_mode(),
                 KeyCode::Char('y') => app.yank_path(),
                 KeyCode::Char('o') => app.open_image_below(),
@@ -331,7 +383,7 @@ fn event_loop(
                 }
                 _ => {}
             },
-            Event::Mouse(m) => match m.kind {
+            Event::Mouse(m) if !app.help => match m.kind {
                 MouseEventKind::ScrollDown => {
                     app.scroll_by(3, viewport_height);
                 }
@@ -364,49 +416,11 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> Rect {
         ),
         Span::raw(" "),
     ]);
-    let mode_label = match app.mode {
-        Mode::Rendered => "rendered",
-        Mode::Raw => "raw",
-    };
-    let key = Style::default()
-        .fg(FRAME_COLOR)
-        .add_modifier(Modifier::BOLD);
-    let hint = Style::default().fg(FRAME_COLOR);
-    let mut bottom_spans = vec![
-        Span::raw(" "),
-        Span::styled("tab", key),
-        Span::styled(format!(" {mode_label}  "), hint),
-        Span::styled("j/k", key),
-        Span::styled(" scroll  ", hint),
-        Span::styled("-/+", key),
-        Span::styled(" width  ", hint),
-        Span::styled("y", key),
-        Span::styled(" copy path  ", hint),
-        Span::styled("o", key),
-        Span::styled(" image  ", hint),
-        Span::styled("q", key),
-        Span::styled(" quit ", hint),
-    ];
-    if let Some(status) = app.current_status() {
-        let color = if status.error { Color::Red } else { TITLE_COLOR };
-        bottom_spans.push(Span::styled(
-            format!(" • {} ", status.text),
-            Style::default().fg(color),
-        ));
-    } else if let Some(i) = app.hover {
-        bottom_spans.push(Span::styled(
-            format!(" • click: {} ", app.images[i].dest),
-            Style::default().fg(TITLE_COLOR),
-        ));
-    }
-    let bottom = Line::from(bottom_spans);
-
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(FRAME_COLOR))
         .padding(Padding::vertical(1))
-        .title(title)
-        .title_bottom(bottom);
+        .title(title);
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -427,7 +441,212 @@ fn draw(frame: &mut ratatui::Frame, app: &App) -> Rect {
         }
     }
 
+    render_scroll_thumb(
+        frame,
+        Rect {
+            x: area.right().saturating_sub(1),
+            y: content_area.y,
+            width: 1,
+            height: content_area.height,
+        },
+        app.line_count() as usize,
+        content_area.height as usize,
+        app.scroll as usize,
+    );
+    render_footer(frame, app, area);
+    if app.help {
+        render_help(frame, area);
+    }
+
     content_area
+}
+
+fn footer_hint(app: &App) -> Line<'static> {
+    let key = Style::default()
+        .fg(FRAME_COLOR)
+        .add_modifier(Modifier::BOLD);
+    let hint = Style::default().fg(FRAME_COLOR);
+    if app.help {
+        return Line::from(vec![
+            Span::raw(" "),
+            Span::styled("esc/q/?", key),
+            Span::styled(" close ", hint),
+        ]);
+    }
+    let mode_label = match app.mode {
+        Mode::Rendered => "rendered",
+        Mode::Raw => "raw",
+    };
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("tab", key),
+        Span::styled(format!(" {mode_label}  "), hint),
+        Span::styled("j/k", key),
+        Span::styled(" scroll  ", hint),
+        Span::styled("-/+", key),
+        Span::styled(" width  ", hint),
+        Span::styled("?", key),
+        Span::styled(" keys  ", hint),
+        Span::styled("q", key),
+        Span::styled(" quit ", hint),
+    ];
+    if let Some(status) = app.current_status() {
+        let color = if status.error { Color::Red } else { TITLE_COLOR };
+        spans.push(Span::styled(
+            format!(" • {} ", status.text),
+            Style::default().fg(color),
+        ));
+    } else if let Some(i) = app.hover {
+        spans.push(Span::styled(
+            format!(" • click: {} ", app.images[i].dest),
+            Style::default().fg(TITLE_COLOR),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Draws the hints and the brand over the block's bottom border. Split into two
+/// rects rather than a pair of block titles so a long status is clipped instead
+/// of running under the brand.
+fn render_footer(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    if area.width < 4 || area.height < 1 {
+        return;
+    }
+    let row = Rect {
+        x: area.x + 1,
+        y: area.bottom() - 1,
+        width: area.width - 2,
+        height: 1,
+    };
+    let [hints, brand] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(BRAND.chars().count() as u16),
+    ])
+    .areas(row);
+    frame.render_widget(Paragraph::new(footer_hint(app)), hints);
+    frame.render_widget(
+        Paragraph::new(BRAND).style(
+            Style::default()
+                .fg(BRAND_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
+        brand,
+    );
+}
+
+/// Hand-rolled rather than `ratatui::Scrollbar`, which rounds the thumb's start
+/// and end independently and so visibly changes the thumb's length by a cell as
+/// you scroll. Here the length is computed once and only the position moves.
+fn render_scroll_thumb(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    len: usize,
+    viewport: usize,
+    offset: usize,
+) {
+    let track = area.height as usize;
+    if track == 0 || viewport == 0 || len <= viewport {
+        return;
+    }
+    let thumb = (track * viewport / len).clamp(1, track);
+    let travel = track - thumb;
+    let max_offset = len - viewport;
+    // Round to nearest so the thumb lands flush at the top and the bottom.
+    let start = (offset.min(max_offset) * travel + max_offset / 2) / max_offset;
+
+    let style = Style::default().fg(FRAME_COLOR);
+    let buf = frame.buffer_mut();
+    for i in start..(start + thumb).min(track) {
+        // `cell_mut` returns None off-buffer; indexing would panic.
+        if let Some(cell) = buf.cell_mut((area.x, area.y + i as u16)) {
+            cell.set_symbol(SCROLL_THUMB).set_style(style);
+        }
+    }
+}
+
+fn help_lines(sections: &[(&str, &[(&str, &str)])]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (i, (title, items)) in sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(" {title}"),
+            Style::default()
+                .fg(TITLE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, desc) in *items {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {key:<12}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled((*desc).to_string(), Style::default().fg(FRAME_COLOR)),
+            ]));
+        }
+    }
+    lines
+}
+
+fn render_help(frame: &mut ratatui::Frame, area: Rect) {
+    let left = help_lines(&[
+        (
+            "Scrolling",
+            &[
+                ("j/k, ↑/↓", "scroll a line"),
+                ("space, PgDn", "page down"),
+                ("PgUp", "page up"),
+                ("g, Home", "jump to top"),
+                ("G, End", "jump to bottom"),
+                ("wheel", "scroll"),
+            ],
+        ),
+        (
+            "View",
+            &[("tab", "rendered ↔ raw"), ("- / +", "column width")],
+        ),
+    ]);
+    let right = help_lines(&[
+        (
+            "Images",
+            &[("o", "open first below"), ("click", "open under cursor")],
+        ),
+        (
+            "Other",
+            &[
+                ("y", "copy file path"),
+                ("?", "toggle this help"),
+                ("q, esc", "quit"),
+            ],
+        ),
+    ]);
+
+    let height = (left.len().max(right.len()) as u16 + 2).min(area.height);
+    let width = 68u16.min(area.width);
+    let dialog = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, dialog);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TITLE_COLOR))
+        .title(Span::styled(
+            " keys ",
+            Style::default()
+                .fg(TITLE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+
+    let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .areas(inner);
+    frame.render_widget(Paragraph::new(left), l);
+    frame.render_widget(Paragraph::new(right), r);
 }
 
 fn visual_line_count<'a>(text: impl Into<Text<'a>>, width: u16) -> u16 {
