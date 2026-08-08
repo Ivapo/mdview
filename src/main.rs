@@ -345,8 +345,10 @@ fn event_loop(
         })?;
         let viewport_height = content_area.height;
 
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
+        if let Some(until) = app.current_status().map(|s| s.until) {
+            if !event::poll(until.saturating_duration_since(Instant::now()))? {
+                continue;
+            }
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press && app.help => {
