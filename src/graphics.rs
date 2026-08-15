@@ -19,17 +19,22 @@ use image::{
 /// over ssh: iTerm2 sets it precisely because ssh forwards `LC_*` but not
 /// `TERM_PROGRAM`.
 pub fn supported() -> bool {
-    if env::var_os("MDVIEW_NO_INLINE_IMAGES").is_some()
-        || env::var_os("TMUX").is_some()
-        || env::var_os("STY").is_some()
-    {
+    supported_in(
+        &env::var("TERM_PROGRAM").unwrap_or_default(),
+        &env::var("LC_TERMINAL").unwrap_or_default(),
+        env::var_os("TMUX").is_some(),
+        env::var_os("STY").is_some(),
+        env::var_os("MDVIEW_NO_INLINE_IMAGES").is_some(),
+    )
+}
+
+/// Split out from the environment lookup so the rules are testable: setting
+/// env vars in a test is process-global and races the other tests.
+fn supported_in(term: &str, lc_terminal: &str, tmux: bool, screen: bool, off: bool) -> bool {
+    if off || tmux || screen {
         return false;
     }
-    let term = env::var("TERM_PROGRAM").unwrap_or_default();
-    term == "iTerm.app"
-        || term == "WezTerm"
-        || term == "rio"
-        || env::var("LC_TERMINAL").unwrap_or_default() == "iTerm2"
+    matches!(term, "iTerm.app" | "WezTerm" | "rio") || lc_terminal == "iTerm2"
 }
 
 /// Encodes cell rows `rows` of `pixels`. Split from `place` so a scroll that
@@ -101,7 +106,28 @@ fn encode_base64(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_base64;
+    use super::{encode_base64, supported_in};
+
+    #[test]
+    fn only_terminals_that_parse_the_sequence_are_opted_in() {
+        // an unrecognised terminal would print the whole base64 payload
+        for term in ["iTerm.app", "WezTerm", "rio"] {
+            assert!(supported_in(term, "", false, false, false), "{term}");
+        }
+        for term in ["Apple_Terminal", "vscode", "ghostty", "kitty", ""] {
+            assert!(!supported_in(term, "", false, false, false), "{term}");
+        }
+        // ssh forwards LC_* but not TERM_PROGRAM, which is how this survives a hop
+        assert!(supported_in("", "iTerm2", false, false, false));
+    }
+
+    #[test]
+    fn multiplexers_and_the_escape_hatch_win_over_the_terminal() {
+        for (tmux, screen, off) in [(true, false, false), (false, true, false), (false, false, true)]
+        {
+            assert!(!supported_in("iTerm.app", "iTerm2", tmux, screen, off));
+        }
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {

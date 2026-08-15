@@ -815,3 +815,188 @@ fn center_column(area: Rect, width: u16) -> Rect {
     .areas(area);
     mid
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Writes a png and returns the directory holding it. Generated rather than
+    /// committed, so the repo stays free of binary fixtures.
+    fn fixture(name: &str, w: u32, h: u32) -> PathBuf {
+        let dir = env::temp_dir().join(format!("mdview-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 253) as u8, 128])
+        });
+        img.save(dir.join("img.png")).unwrap();
+        dir
+    }
+
+    /// Built by hand rather than through App::new, which asks crossterm for the
+    /// terminal size and so would render at a different width under `cargo test`
+    /// than under `cargo test -- --nocapture`.
+    fn app_with(width: u16, md: &str, dir: &Path) -> App {
+        let (rendered, images) = render::render(md, width, dir);
+        let image_rows = row_ranges(&rendered, &images, width);
+        App {
+            path: dir.join("t.md"),
+            source: md.to_string(),
+            rendered,
+            images,
+            image_rows,
+            content_width: width,
+            mode: Mode::Rendered,
+            scroll: 0,
+            raw_line_count: 0,
+            rendered_line_count: u16::MAX,
+            status: None,
+            hover: None,
+            help: false,
+        }
+    }
+
+    const HEAD: &str = "\x1b]1337;File=inline=1;width=";
+
+    /// The (width, height) cell box of every image written to `out`.
+    fn boxes(out: &[u8]) -> Vec<(u16, u16)> {
+        let s = String::from_utf8_lossy(out).into_owned();
+        s.match_indices(HEAD)
+            .map(|(i, _)| {
+                let rest = &s[i + HEAD.len()..];
+                let (w, rest) = rest.split_once(';').unwrap();
+                let h = rest
+                    .strip_prefix("height=")
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap();
+                (w.parse().unwrap(), h.parse().unwrap())
+            })
+            .collect()
+    }
+
+    fn one_image(name: &str) -> (App, Rect) {
+        let dir = fixture(name, 800, 400);
+        let app = app_with(76, "lead in\n\n![i](img.png)\n", &dir);
+        (app, Rect::new(2, 1, 76, 40))
+    }
+
+    #[test]
+    fn the_box_matches_the_rows_the_halfblocks_reserved() {
+        let (app, area) = one_image("box");
+        let art = app.images[0].art.as_ref().unwrap();
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, area, &mut vec![]).unwrap();
+        assert_eq!(boxes(&out), vec![art.cells]);
+        // 800x400 at 80% of a 76-cell column: 60 cells wide, 30 px rows, 15 cell rows
+        assert_eq!(art.cells, (60, 15));
+    }
+
+    #[test]
+    fn a_partly_scrolled_image_crops_to_its_visible_rows() {
+        let (mut app, area) = one_image("crop");
+        let (start, end) = app.image_rows[0].art.unwrap();
+        let rows = (end - start) as u16;
+
+        // scrolled off the top: the box loses exactly the hidden rows
+        app.scroll = start as u16 + 4;
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, area, &mut vec![]).unwrap();
+        assert_eq!(boxes(&out), vec![(60, rows - 4)]);
+
+        // running past the bottom: cropped to what the viewport can hold
+        app.scroll = 0;
+        let short = Rect::new(2, 1, 76, start as u16 + 3);
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, short, &mut vec![]).unwrap();
+        assert_eq!(boxes(&out), vec![(60, 3)]);
+    }
+
+    #[test]
+    fn an_image_scrolled_out_of_view_is_not_drawn() {
+        let (mut app, area) = one_image("gone");
+        let (_, end) = app.image_rows[0].art.unwrap();
+        app.scroll = end as u16;
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, area, &mut vec![]).unwrap();
+        assert!(boxes(&out).is_empty());
+    }
+
+    #[test]
+    fn raw_view_and_the_help_overlay_draw_nothing() {
+        // the protocol writes after ratatui flushes, so it would paint over both
+        for set in [
+            (|a: &mut App| a.mode = Mode::Raw) as fn(&mut App),
+            |a: &mut App| a.help = true,
+        ] {
+            let (mut app, area) = one_image("suppressed");
+            set(&mut app);
+            let mut out = vec![];
+            draw_inline_images(&mut out, &app, area, &mut vec![]).unwrap();
+            assert!(boxes(&out).is_empty());
+        }
+    }
+
+    #[test]
+    fn coming_back_from_raw_view_redraws_even_though_nothing_moved() {
+        let (mut app, area) = one_image("return");
+        let mut placed = vec![];
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, area, &mut placed).unwrap();
+        assert_eq!(boxes(&out).len(), 1);
+
+        app.mode = Mode::Raw;
+        draw_inline_images(&mut vec![], &app, area, &mut placed).unwrap();
+
+        app.mode = Mode::Rendered;
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, area, &mut placed).unwrap();
+        assert_eq!(boxes(&out).len(), 1, "raw view overwrote it; it must be resent");
+    }
+
+    #[test]
+    fn an_unmoved_image_is_not_resent_but_a_moved_one_is() {
+        let (mut app, area) = one_image("resend");
+        let mut placed = vec![];
+        let mut first = vec![];
+        draw_inline_images(&mut first, &app, area, &mut placed).unwrap();
+        assert_eq!(boxes(&first).len(), 1);
+
+        // same frame again: a hover or an expiring status must cost nothing
+        let mut again = vec![];
+        draw_inline_images(&mut again, &app, area, &mut placed).unwrap();
+        assert!(again.is_empty());
+
+        app.scroll += 1;
+        let mut moved = vec![];
+        draw_inline_images(&mut moved, &app, area, &mut placed).unwrap();
+        assert_eq!(boxes(&moved).len(), 1);
+    }
+
+    #[test]
+    fn a_resize_forces_a_redraw_of_images_that_did_not_move() {
+        let (app, area) = one_image("resize");
+        let mut placed = vec![];
+        draw_inline_images(&mut vec![], &app, area, &mut placed).unwrap();
+        placed.clear(); // what the Event::Resize arm does
+        let mut out = vec![];
+        draw_inline_images(&mut out, &app, area, &mut placed).unwrap();
+        assert_eq!(boxes(&out).len(), 1);
+    }
+
+    #[test]
+    fn an_image_smaller_than_the_column_keeps_its_own_size() {
+        let dir = fixture("small", 160, 160);
+        let app = app_with(76, "lead in\n\n![i](img.png)\n", &dir);
+        let art = app.images[0].art.as_ref().unwrap();
+        // 160px / IMAGE_CELL_PX = 20 cells, well under 80% of the column
+        assert_eq!(art.cells, (20, 10));
+        assert_eq!(
+            art.pixels.width(),
+            160,
+            "a small image must not be upscaled on the way out"
+        );
+    }
+}

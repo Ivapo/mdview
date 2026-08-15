@@ -1132,3 +1132,44 @@ fn make_table_border(
     s.push_str(right);
     Line::from(Span::styled(s, style))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    fn lines_of(md: &str) -> (Vec<String>, Vec<super::ImageRef>) {
+        let (text, images) = super::render(md, 90, Path::new("/nonexistent"));
+        let lines = text
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        (lines, images)
+    }
+
+    #[test]
+    fn images_that_cannot_be_drawn_keep_a_caption_and_stay_clickable() {
+        // svg is decodable by neither iTerm2 nor the image crate, remote urls are
+        // never fetched, and a bad path can't be read -- all degrade the same way
+        let md = "a\n\n![](logo.svg)\n\nb\n\n![](nope.png)\n\nc\n\n![](https://e.com/x.png)\n";
+        let (lines, images) = lines_of(md);
+        for want in [
+            "[image: logo.svg]",
+            "[image: nope.png]",
+            "[image: https://e.com/x.png]",
+        ] {
+            assert!(lines.iter().any(|l| l.contains(want)), "missing {want}");
+        }
+        assert_eq!(images.len(), 3, "each stays an o/click target");
+        assert!(images.iter().all(|i| i.art.is_none()));
+    }
+
+    #[test]
+    fn images_in_a_quote_or_table_are_caption_only() {
+        // the quote re-wrap invalidates recorded line indices, so no art is kept
+        let (_, quoted) = lines_of("> ![](nope.png)\n");
+        assert!(quoted.iter().all(|i| i.art.is_none()));
+        let (_, tabled) = lines_of("| a |\n|---|\n| ![](nope.png) |\n");
+        assert!(tabled.iter().all(|i| i.art.is_none()));
+    }
+}
