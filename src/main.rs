@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     panic,
     path::{Path, PathBuf},
     process,
@@ -25,6 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
+mod graphics;
 mod math;
 mod render;
 
@@ -52,6 +53,32 @@ enum Mode {
     Raw,
 }
 
+/// What was last drawn for one image. The protocol has no image ids, so every
+/// emission resends the whole payload; frames that leave an image where it was
+/// (a hover, an expiring status) skip it instead.
+#[derive(PartialEq, Clone, Copy)]
+struct Placement {
+    x: u16,
+    y: u16,
+    cells: (u16, u16),
+    rows: (u16, u16),
+}
+
+/// The last emission for one image, payload included: scrolling a fully visible
+/// image moves it without changing its crop, so the bytes are reused.
+struct Drawn {
+    at: Placement,
+    png: Vec<u8>,
+}
+
+/// Visual (post-wrap) row ranges for one image, parallel to `App::images`.
+struct ImageRows {
+    /// Half-block rows plus the caption: the click and hover target.
+    click: (usize, usize),
+    /// The half-block rows alone, for images a graphics protocol can paint over.
+    art: Option<(usize, usize)>,
+}
+
 struct Status {
     text: String,
     until: Instant,
@@ -63,7 +90,7 @@ struct App {
     source: String,
     rendered: Text<'static>,
     images: Vec<render::ImageRef>,
-    image_rows: Vec<(usize, usize)>,
+    image_rows: Vec<ImageRows>,
     content_width: u16,
     mode: Mode,
     scroll: u16,
@@ -84,7 +111,7 @@ impl App {
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
         let (rendered, images) = render::render(&source, content_width, &base);
         let rendered_line_count = visual_line_count(rendered.clone(), content_width);
-        let image_rows = image_row_ranges(&rendered, &images, content_width);
+        let image_rows = row_ranges(&rendered, &images, content_width);
         Self {
             path,
             source,
@@ -138,8 +165,7 @@ impl App {
         let (rendered, images) = render::render(&self.source, self.content_width, &base);
         self.rendered = rendered;
         self.images = images;
-        self.image_rows =
-            image_row_ranges(&self.rendered, &self.images, self.content_width);
+        self.image_rows = row_ranges(&self.rendered, &self.images, self.content_width);
         self.rendered_line_count = visual_line_count(self.rendered.clone(), self.content_width);
         self.raw_line_count = visual_line_count(self.source.as_str(), self.content_width);
         self.scroll = self
@@ -202,7 +228,7 @@ impl App {
             return;
         }
         let scroll = self.scroll as usize;
-        match self.image_rows.iter().position(|&(_, end)| end > scroll) {
+        match self.image_rows.iter().position(|r| r.click.1 > scroll) {
             Some(i) => self.open_image(i),
             None => {
                 self.status = Some(Status {
@@ -221,7 +247,7 @@ impl App {
         let visual = self.scroll as usize + (row - area.y) as usize;
         self.image_rows
             .iter()
-            .position(|&(start, end)| start <= visual && visual < end)
+            .position(|r| r.click.0 <= visual && visual < r.click.1)
     }
 
     fn click(&mut self, column: u16, row: u16, area: Rect) {
@@ -338,11 +364,16 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    let inline_images = graphics::supported();
+    let mut placed: Vec<Option<Drawn>> = vec![];
     let mut content_area = Rect::default();
     loop {
         terminal.draw(|frame| {
             content_area = draw(frame, app);
         })?;
+        if inline_images {
+            draw_inline_images(terminal.backend_mut(), app, content_area, &mut placed)?;
+        }
         let viewport_height = content_area.height;
 
         if let Some(until) = app.current_status().map(|s| s.until) {
@@ -350,59 +381,140 @@ fn event_loop(
                 continue;
             }
         }
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press && app.help => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
-                ) {
-                    app.help = false;
-                }
+        // Key repeat and mouse-move floods arrive faster than a frame carrying an
+        // inline image can be written, so apply everything already queued and draw
+        // once, rather than emitting a payload per keystroke and falling behind.
+        let mut ev = event::read()?;
+        loop {
+            if handle_event(ev, app, viewport_height, content_area, &mut placed) {
+                return Ok(());
             }
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('?') => app.help = true,
-                KeyCode::Tab => app.toggle_mode(),
-                KeyCode::Char('y') => app.yank_path(),
-                KeyCode::Char('o') => app.open_image_below(),
-                KeyCode::Char('-') => app.adjust_width(-(WIDTH_STEP as i32)),
-                KeyCode::Char('+') | KeyCode::Char('=') => {
-                    app.adjust_width(WIDTH_STEP as i32)
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    app.scroll_by(SCROLL_STEP as i32, viewport_height)
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    app.scroll_by(-(SCROLL_STEP as i32), viewport_height)
-                }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    app.scroll_by(PAGE_STEP as i32, viewport_height)
-                }
-                KeyCode::PageUp => app.scroll_by(-(PAGE_STEP as i32), viewport_height),
-                KeyCode::Home | KeyCode::Char('g') => app.scroll = 0,
-                KeyCode::End | KeyCode::Char('G') => {
-                    app.scroll_by(i32::MAX, viewport_height)
-                }
-                _ => {}
-            },
-            Event::Mouse(m) if !app.help => match m.kind {
-                MouseEventKind::ScrollDown => {
-                    app.scroll_by(3, viewport_height);
-                }
-                MouseEventKind::ScrollUp => {
-                    app.scroll_by(-3, viewport_height);
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    app.click(m.column, m.row, content_area);
-                }
-                MouseEventKind::Moved => {
-                    app.hover = app.image_at(m.column, m.row, content_area);
-                }
-                _ => {}
-            },
-            _ => {}
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
+            ev = event::read()?;
         }
     }
+}
+
+/// Returns true when the app should quit.
+fn handle_event(
+    ev: Event,
+    app: &mut App,
+    viewport_height: u16,
+    content_area: Rect,
+    placed: &mut Vec<Option<Drawn>>,
+) -> bool {
+    match ev {
+        Event::Key(key) if key.kind == KeyEventKind::Press && app.help => {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
+            ) {
+                app.help = false;
+            }
+        }
+        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Tab => app.toggle_mode(),
+            KeyCode::Char('y') => app.yank_path(),
+            KeyCode::Char('o') => app.open_image_below(),
+            KeyCode::Char('-') => app.adjust_width(-(WIDTH_STEP as i32)),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                app.adjust_width(WIDTH_STEP as i32)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.scroll_by(SCROLL_STEP as i32, viewport_height)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.scroll_by(-(SCROLL_STEP as i32), viewport_height)
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                app.scroll_by(PAGE_STEP as i32, viewport_height)
+            }
+            KeyCode::PageUp => app.scroll_by(-(PAGE_STEP as i32), viewport_height),
+            KeyCode::Home | KeyCode::Char('g') => app.scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                app.scroll_by(i32::MAX, viewport_height)
+            }
+            _ => {}
+        },
+        Event::Mouse(m) if !app.help => match m.kind {
+            MouseEventKind::ScrollDown => {
+                app.scroll_by(3, viewport_height);
+            }
+            MouseEventKind::ScrollUp => {
+                app.scroll_by(-3, viewport_height);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                app.click(m.column, m.row, content_area);
+            }
+            MouseEventKind::Moved => {
+                app.hover = app.image_at(m.column, m.row, content_area);
+            }
+            _ => {}
+        },
+        // a resize forces a full repaint, wiping images that never moved
+        Event::Resize(..) => placed.clear(),
+        _ => {}
+    }
+    false
+}
+
+/// Paints real images over the half-block rows that reserved their space, after
+/// ratatui has flushed. Skipped in raw view and behind the help overlay, both of
+/// which the protocol would otherwise draw straight over.
+fn draw_inline_images<W: Write>(
+    out: &mut W,
+    app: &App,
+    area: Rect,
+    last: &mut Vec<Option<Drawn>>,
+) -> io::Result<()> {
+    // clearing rather than returning: whatever covered the images has to be
+    // redrawn over when we come back, however the placement compares
+    if app.mode != Mode::Rendered || app.help || area.height == 0 {
+        last.clear();
+        return Ok(());
+    }
+    last.resize_with(app.images.len(), || None);
+    let top = app.scroll as usize;
+    let bottom = top + area.height as usize;
+    let mut drawn = false;
+    for (i, (img, rows)) in app.images.iter().zip(&app.image_rows).enumerate() {
+        let (Some(art), Some((start, end))) = (img.art.as_ref(), rows.art) else {
+            continue;
+        };
+        let (vis_start, vis_end) = (start.max(top), end.min(bottom));
+        if vis_end <= vis_start {
+            last[i] = None;
+            continue;
+        }
+        let at = Placement {
+            x: area.x + art.pad,
+            y: area.y + (vis_start - top) as u16,
+            cells: art.cells,
+            rows: ((vis_start - start) as u16, (vis_end - vis_start) as u16),
+        };
+        // an unmoved image is still on screen: ratatui only repaints its rows
+        // when the content under them changed, which would have moved it
+        let previous = last[i].take();
+        if previous.as_ref().is_some_and(|d| d.at == at) {
+            last[i] = previous;
+            continue;
+        }
+        let png = match previous {
+            Some(d) if (d.at.cells, d.at.rows) == (at.cells, at.rows) => d.png,
+            _ => graphics::encode(&art.pixels, at.cells, at.rows)?,
+        };
+        graphics::place(out, at.x, at.y, at.cells.0, at.rows.1, &png)?;
+        last[i] = Some(Drawn { at, png });
+        drawn = true;
+    }
+    if drawn {
+        out.flush()?;
+    }
+    Ok(())
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &App) -> Rect {
@@ -658,12 +770,14 @@ fn visual_line_count<'a>(text: impl Into<Text<'a>>, width: u16) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
-// ratatui wraps each Line independently, so per-line counts sum to exact visual offsets
-fn image_row_ranges(
+// ratatui wraps each Line independently, so per-line counts sum to exact visual
+// offsets. Returns the click/hover ranges and, for images the terminal can draw
+// natively, the range covering just their half-block rows.
+fn row_ranges(
     text: &Text<'static>,
     images: &[render::ImageRef],
     width: u16,
-) -> Vec<(usize, usize)> {
+) -> Vec<ImageRows> {
     if images.is_empty() {
         return vec![];
     }
@@ -674,16 +788,16 @@ fn image_row_ranges(
         acc += visual_line_count(line.clone(), width) as usize;
         offsets.push(acc);
     }
+    let visual = |(a, b): (usize, usize)| {
+        let start = offsets.get(a).copied().unwrap_or(acc);
+        let end = offsets.get(b).copied().unwrap_or(acc).max(start + 1);
+        (start, end)
+    };
     images
         .iter()
-        .map(|img| {
-            let start = offsets.get(img.lines.0).copied().unwrap_or(acc);
-            let end = offsets
-                .get(img.lines.1)
-                .copied()
-                .unwrap_or(acc)
-                .max(start + 1);
-            (start, end)
+        .map(|img| ImageRows {
+            click: visual(img.lines),
+            art: img.art.as_ref().map(|a| visual(a.lines)),
         })
         .collect()
 }

@@ -31,6 +31,17 @@ const QUOTE_PREFIX_W: usize = 2;
 const TABLE_MIN_COL: usize = 3;
 const CODE_LEFT_PAD: usize = 2;
 const IMAGE_WIDTH_PCT: u32 = 80;
+/// Horizontal pixels per cell the inline-protocol bitmap is rendered at. 8 puts a
+/// 72-cell image at 576px, near 1:1 with the box's logical size, for ~390KB a
+/// frame. Raising it is sharper on a retina display but every scroll step resends
+/// the payload, and once a frame takes long enough the half-block underlay shows
+/// through while scrolling.
+const IMAGE_PX_PER_CELL: u32 = 8;
+/// Assumed width of a cell in pixels, used only to decide when an image is too
+/// small to fill the column and should render at its own size instead. Layout,
+/// not quality: deliberately separate from `IMAGE_PX_PER_CELL` so tuning
+/// sharpness doesn't silently resize small images.
+const IMAGE_CELL_PX: u32 = 8;
 const MATH_COLOR: Color = Color::Rgb(186, 200, 255);
 const META_KEY_COLOR: Color = Color::DarkGray;
 const META_VALUE_COLOR: Color = Color::Green;
@@ -39,6 +50,25 @@ const META_GAP: usize = 2;
 pub struct ImageRef {
     pub lines: (usize, usize),
     pub dest: String,
+    /// Present only for images drawn as half-blocks, i.e. the ones a graphics
+    /// protocol can paint over.
+    pub art: Option<Art>,
+}
+
+/// The half-block block's geometry plus a higher-resolution copy of the same
+/// pixels, for terminals that can draw the real image over it.
+pub struct Art {
+    /// Line range of the half-block rows only; excludes the caption in
+    /// `ImageRef::lines`.
+    pub lines: (usize, usize),
+    /// Width and height of the block in cells.
+    pub cells: (u16, u16),
+    /// Indent from the left of the content column, in cells.
+    pub pad: u16,
+    /// Sized so `cells` divides it exactly, which makes cropping to a row range
+    /// a plain slice and keeps the aspect identical to the half-block box.
+    /// Opaque: alpha is composited over black up front, as the half-blocks do.
+    pub pixels: image::RgbImage,
 }
 
 pub fn render(source: &str, width: u16, base: &Path) -> (Text<'static>, Vec<ImageRef>) {
@@ -301,12 +331,15 @@ impl Renderer {
             Tag::Image { dest_url, .. } => {
                 if self.table.is_none() {
                     let start = self.lines.len();
-                    if self.quote_depth == 0 && self.cur.is_empty() {
-                        self.emit_halfblock_image(&dest_url);
-                    }
+                    let art = if self.quote_depth == 0 && self.cur.is_empty() {
+                        self.emit_halfblock_image(&dest_url)
+                    } else {
+                        None
+                    };
                     self.images.push(ImageRef {
                         lines: (start, self.lines.len() + 1),
                         dest: dest_url.to_string(),
+                        art,
                     });
                 }
                 self.push_text(&format!("[image: {dest_url}]"));
@@ -669,9 +702,9 @@ impl Renderer {
     }
 
     // one cell = 1 pixel wide, 2 pixels tall: ▀ fg is the top pixel, bg the bottom
-    fn emit_halfblock_image(&mut self, dest: &str) {
+    fn emit_halfblock_image(&mut self, dest: &str) -> Option<Art> {
         if dest.starts_with("http://") || dest.starts_with("https://") {
-            return;
+            return None;
         }
         let p = Path::new(dest);
         let path = if p.is_absolute() {
@@ -679,15 +712,22 @@ impl Renderer {
         } else {
             self.base.join(p)
         };
-        let Ok(img) = image::open(&path) else { return };
+        let img = image::open(&path).ok()?;
         let (ow, oh) = (img.width(), img.height());
         if ow == 0 || oh == 0 {
-            return;
+            return None;
         }
-        let tw = (self.width as u32 * IMAGE_WIDTH_PCT / 100).min(ow).max(1);
+        // fit to the column, but never wider than the source can fill: a cell is
+        // one pixel to the half-blocks and several to the inline protocol, so
+        // without this a small image is stretched across 80% of the column
+        let natural = (ow / IMAGE_CELL_PX).max(1);
+        let tw = (self.width as u32 * IMAGE_WIDTH_PCT / 100)
+            .min(natural)
+            .max(1);
         let th = (oh * tw / ow).max(1);
         let rgba = img.resize_exact(tw, th, FilterType::Triangle).to_rgba8();
         let pad = (self.width as usize).saturating_sub(tw as usize) / 2;
+        let start = self.lines.len();
         for y in (0..th).step_by(2) {
             let mut spans: Vec<Span<'static>> = vec![];
             if pad > 0 {
@@ -703,6 +743,21 @@ impl Renderer {
             }
             self.lines.push(Line::from(spans));
         }
+        let rows = (self.lines.len() - start) as u16;
+        // height must be an exact multiple of the cell rows: cropping to a visible
+        // row range is then a plain slice of the pixel buffer. Never below the two
+        // rows a half-block cell already carries.
+        let pw = (tw * IMAGE_PX_PER_CELL).min(ow).max(1);
+        let px_per_row = (pw * 2 / tw).max(2);
+        let hi = img
+            .resize_exact(pw, px_per_row * rows as u32, FilterType::Triangle)
+            .to_rgba8();
+        Some(Art {
+            lines: (start, self.lines.len()),
+            cells: (tw as u16, rows),
+            pad: pad as u16,
+            pixels: flatten(&hi),
+        })
     }
 
     fn emit_blockquote(&mut self, start: usize) {
@@ -819,6 +874,19 @@ fn justify_line(line: &mut Vec<Span<'static>>, width: usize) {
             line[i].content.to_mut().push_str(&" ".repeat(extra));
         }
     }
+}
+
+// same "over black" rule as `px`, so the inline image matches its half-block underlay
+fn flatten(img: &image::RgbaImage) -> image::RgbImage {
+    image::RgbImage::from_fn(img.width(), img.height(), |x, y| {
+        let p = img.get_pixel(x, y);
+        let a = p[3] as u16;
+        image::Rgb([
+            (p[0] as u16 * a / 255) as u8,
+            (p[1] as u16 * a / 255) as u8,
+            (p[2] as u16 * a / 255) as u8,
+        ])
+    })
 }
 
 fn px(img: &image::RgbaImage, x: u32, y: u32) -> Color {
